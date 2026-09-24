@@ -156,6 +156,7 @@ export default function App() {
   const [editingId, setEditingId] = useState(null)
   const [editingNameId, setEditingNameId] = useState(null)
   const [showHelp, setShowHelp] = useState(false)
+  const [ctxMenu, setCtxMenu] = useState(null)
   const [peers, setPeers] = useState({})
 
   const stageRef = useRef(null)
@@ -163,6 +164,7 @@ export default function App() {
   const spaceRef = useRef(false)
   const lastPushRef = useRef(0)
   const lastCursorRef = useRef(0)
+  const lastArrowRef = useRef(0)
   const chanRef = useRef(null)
   const editingTextRef = useRef(null)
 
@@ -541,6 +543,164 @@ export default function App() {
   }
   const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
 
+  /* ---------------- shared actions (keyboard + context menu) ---------------- */
+
+  const rootIds = shapes
+    .filter((s) => selectedIds.includes(s.id) && !(s.parentId && selectedIds.includes(s.parentId)))
+    .map((s) => s.id)
+
+  const copySel = () => {
+    if (!selectedIds.length) return
+    clipboard = shapes.filter((s) => withDescendants(shapes, selectedIds).has(s.id))
+  }
+
+  const cutSel = () => {
+    if (!selectedIds.length || editingId) return
+    copySel()
+    deleteSel()
+  }
+
+  const pasteClip = () => {
+    if (!clipboard.length) return
+    pushHistory(shapes)
+    const idMap = new Map(clipboard.map((s) => [s.id, uid()]))
+    const clones = clipboard.map((s) => ({
+      ...s,
+      id: idMap.get(s.id),
+      x: s.x + 24,
+      y: s.y + 24,
+      parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
+    }))
+    const originals = new Map(clipboard.map((s) => [idMap.get(s.id), s]))
+    const clipSet = new Set(clipboard.map((s) => s.id))
+    const rootOfClip = (s) => !(s.parentId && clipSet.has(s.parentId))
+    setShapes([...shapes, ...clones])
+    setSelectedIds(clones.filter((c) => rootOfClip(originals.get(c.id))).map((c) => c.id))
+  }
+
+  const duplicateSel = () => {
+    if (!selectedIds.length || editingId) return
+    pushHistory(shapes)
+    const ids = withDescendants(shapes, selectedIds)
+    const idMap = new Map(shapes.filter((s) => ids.has(s.id)).map((s) => [s.id, uid()]))
+    const clones = shapes
+      .filter((s) => ids.has(s.id))
+      .map((s) => ({
+        ...s,
+        id: idMap.get(s.id),
+        x: s.x + 24,
+        y: s.y + 24,
+        parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
+      }))
+    /* select clones of top-level selection */
+    const rootDups = clones.filter((c) => rootIds.includes(c.id)).map((c) => c.id)
+    setShapes([...shapes, ...clones])
+    setSelectedIds(rootDups.length ? rootDups : clones.map((c) => c.id))
+  }
+
+  const deleteSel = () => {
+    if (!selectedIds.length || editingId) return
+    deleteMany(selectedIds)
+  }
+
+  const selectAll = () => {
+    setSelectedIds(
+      shapes
+        .filter((s) => s.visible !== false && !(s.parentId && shapes.some((k) => k.id === s.parentId)))
+        .map((s) => s.id),
+    )
+  }
+
+  const reorderSel = (front) => {
+    if (!selectedIds.length) return
+    pushHistory(shapes)
+    const set = withDescendants(shapes, selectedIds)
+    const moved = shapes.filter((s) => set.has(s.id))
+    const rest = shapes.filter((s) => !set.has(s.id))
+    setShapes(front ? [...rest, ...moved] : [...moved, ...rest])
+  }
+
+  const nudge = (dx, dy) => {
+    if (!selectedIds.length) return
+    /* burst collapsing: одна запись истории на серию нажатий (до паузы 700мс) */
+    const now = performance.now()
+    if (now - lastArrowRef.current > 700) pushHistory(shapes)
+    lastArrowRef.current = now
+    const ids = withDescendants(shapes, selectedIds)
+    setShapes((cur) =>
+      cur.map((s) => (ids.has(s.id) ? { ...s, x: s.x + dx, y: s.y + dy } : s)),
+    )
+  }
+
+  /* align / distribute по мультивыделению (корни;
+     потомки следуют за своим корнем) */
+  const alignSel = (mode) => {
+    const roots = shapes.filter((s) => rootIds.includes(s.id))
+    if (!roots.length) return
+    const rects = roots.map((s) => ({ s, r: shapeRect(s) }))
+    const minX = Math.min(...rects.map(({ r }) => r.x))
+    const maxX = Math.max(...rects.map(({ r }) => r.x + r.w))
+    const minY = Math.min(...rects.map(({ r }) => r.y))
+    const maxY = Math.max(...rects.map(({ r }) => r.y + r.h))
+
+    const deltas = new Map()
+    const setDelta = (s, dx, dy) => {
+      for (const id of withDescendants(shapes, [s.id])) deltas.set(id, { dx, dy })
+    }
+
+    if (mode === 'dist-x' || mode === 'dist-y') {
+      if (roots.length < 3) return
+      const vert = mode === 'dist-y'
+      const sorted = [...rects].sort((a, b) =>
+        vert ? a.r.y - b.r.y : a.r.x - b.r.x,
+      )
+      const centers = sorted.map(({ r }) => (vert ? r.y + r.h / 2 : r.x + r.w / 2))
+      const c0 = centers[0]
+      const cLast = centers[centers.length - 1]
+      sorted.forEach(({ s, r }, i) => {
+        const target = c0 + ((cLast - c0) * i) / (sorted.length - 1)
+        const cur = vert ? r.y + r.h / 2 : r.x + r.w / 2
+        setDelta(s, vert ? 0 : target - cur, vert ? target - cur : 0)
+      })
+    } else {
+      const cxT = (minX + maxX) / 2
+      const cyT = (minY + maxY) / 2
+      for (const { s, r } of rects) {
+        if (mode === 'left') setDelta(s, minX - r.x, 0)
+        else if (mode === 'right') setDelta(s, maxX - (r.x + r.w), 0)
+        else if (mode === 'center-x') setDelta(s, cxT - (r.x + r.w / 2), 0)
+        else if (mode === 'top') setDelta(s, 0, minY - r.y)
+        else if (mode === 'bottom') setDelta(s, 0, maxY - (r.y + r.h))
+        else if (mode === 'center-y') setDelta(s, 0, cyT - (r.y + r.h / 2))
+      }
+    }
+
+    if (!deltas.size) return
+    pushHistory(shapes)
+    setShapes((cur) =>
+      cur.map((s) => {
+        const d = deltas.get(s.id)
+        return d ? { ...s, x: s.x + d.dx, y: s.y + d.dy } : s
+      }),
+    )
+  }
+
+  /* figure out target items for the context menu */
+  const openContextMenu = (e) => {
+    e.preventDefault()
+    const el = e.target.closest('[data-shape]')
+    if (el && !selectedIds.includes(el.dataset.shape)) {
+      setSelectedIds([el.dataset.shape])
+      if (tool !== 'select') setTool('select')
+    }
+    const bw = 236
+    setCtxMenu({
+      x: Math.min(e.clientX, window.innerWidth - bw - 8),
+      y: Math.min(e.clientY, window.innerHeight - 330),
+      onShape: !!(el && shapes.find((k) => k.id === el.dataset.shape)),
+    })
+  }
+
   /* ---------------- keyboard ---------------- */
 
   useEffect(() => {
@@ -551,10 +711,8 @@ export default function App() {
           ce.blur()
           return
         }
-        if (showHelp) {
-          setShowHelp(false)
-          return
-        }
+        setShowHelp(false)
+        setCtxMenu(null)
         setEditingId(null)
         setSelectedIds([])
         setTool('select')
@@ -567,99 +725,63 @@ export default function App() {
 
       if (e.code === 'Space' && !e.repeat) spaceRef.current = true
 
+      /* physical key codes — работают в любой раскладке */
+      const code = e.code
+      const letter = code.startsWith('Key') ? code.slice(3).toLowerCase() : null
       const mod = e.ctrlKey || e.metaKey
-      if (mod && e.key.toLowerCase() === 'z') {
+
+      if (mod && letter === 'z') {
         e.preventDefault()
         if (e.shiftKey) redo()
         else undo()
-      } else if (mod && e.key.toLowerCase() === 'y') {
+      } else if (mod && letter === 'y') {
         e.preventDefault()
         redo()
-      } else if (mod && e.key === '0') {
+      } else if (mod && code === 'Digit0') {
         e.preventDefault()
         fitView()
-      } else if (mod && e.key.toLowerCase() === 'd') {
+      } else if (mod && letter === 'a') {
         e.preventDefault()
-        if (selectedIds.length) {
-          pushHistory(shapes)
-          const ids = [...withDescendants(shapes, selectedIds)]
-          const clones = shapes
-            .filter((s) => ids.includes(s.id))
-            .map((s) => ({ ...s, id: uid(), x: s.x + 24, y: s.y + 24, parentId: ids.includes(s.parentId) ? s.id : s.parentId }))
-          setShapes([...shapes, ...clones])
-          setSelectedIds(clones.map((s) => s.id))
-        }
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length && !editingId) {
+        if (!editingId) selectAll()
+      } else if (mod && letter === 'd') {
         e.preventDefault()
-        const ids = [...withDescendants(shapes, selectedIds)]
-        pushHistory(shapes)
-        setShapes(shapes.filter((s) => !ids.has(s.id)))
-        setSelectedIds([])
-      } else if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
+        duplicateSel()
+      } else if ((code === 'Delete' || code === 'Backspace') && selectedIds.length && !editingId) {
         e.preventDefault()
-        if (selectedIds.length) {
-          const keep = withDescendants(shapes, selectedIds)
-          clipboard = shapes.filter((s) => keep.has(s.id))
-          if (e.key.toLowerCase() === 'x') {
-            pushHistory(shapes)
-            setShapes(shapes.filter((s) => !keep.has(s.id)))
-            setSelectedIds([])
-          }
-        }
-      } else if (mod && e.key.toLowerCase() === 'v') {
+        deleteSel()
+      } else if (mod && (letter === 'c' || letter === 'x')) {
         e.preventDefault()
-        if (clipboard.length) {
-          pushHistory(shapes)
-          const idMap = new Map(clipboard.map((s) => [s.id, uid()]))
-          const clones = clipboard.map((s) => ({
-            ...s,
-            id: idMap.get(s.id),
-            x: s.x + 24,
-            y: s.y + 24,
-            parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
-          }))
-          setShapes([...shapes, ...clones])
-          setSelectedIds(clones.map((s) => s.id))
-        }
-      } else if (e.key === '?') {
+        if (letter === 'x') cutSel()
+        else copySel()
+      } else if (mod && letter === 'v') {
+        e.preventDefault()
+        pasteClip()
+      } else if (e.key === '?' || (e.shiftKey && code === 'Slash')) {
         e.preventDefault()
         setShowHelp((v) => !v)
       } else if (e.key === 'Enter' && selectedIds.length === 1 && !editingId) {
         const s = shapes.find((k) => k.id === selectedIds[0])
-        if (s && s.type === 'text') {
-          setEditingId(s.id)
-          return
-        }
-        if (selected.type === 'frame' || shapes.some((k) => k.id === selectedIds[0])) {
-          setEditingNameId(selectedIds[0])
-        }
-      } else if (selectedIds.length && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        if (s && s.type === 'text') setEditingId(s.id)
+        else if (s) setEditingNameId(s.id)
+      } else if (selectedIds.length && code.startsWith('Arrow')) {
         e.preventDefault()
         const step = e.shiftKey ? 10 : 1
-        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
-        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
-        if (!e.repeat || step > 1 || performance.now() - lastPushRef.current > 40) {
-          pushHistory(shapes)
-        }
-        const ids = withDescendants(shapes, selectedIds)
-        setShapes((cur) =>
-          cur.map((s) => (ids.has(s.id) ? { ...s, x: s.x + dx, y: s.y + dy } : s)),
-        )
-      } else if ((e.key === ']' || e.key === '[') && selectedIds.length) {
-        pushHistory(shapes)
-        const set = new Set(withDescendants(shapes, selectedIds))
-        const rest = shapes.filter((s) => !set.has(s.id))
-        const moved = shapes.filter((s) => set.has(s.id))
-        setShapes(e.key === ']' ? [...rest, ...moved] : [...moved, ...rest])
-      } else if (e.key === 'F2' && selectedIds.length === 1) {
+        const dx = code === 'ArrowLeft' ? -step : code === 'ArrowRight' ? step : 0
+        const dy = code === 'ArrowUp' ? -step : code === 'ArrowDown' ? step : 0
+        nudge(dx, dy)
+      } else if (code === 'BracketRight' && selectedIds.length) {
+        reorderSel(true)
+      } else if (code === 'BracketLeft' && selectedIds.length) {
+        reorderSel(false)
+      } else if (code === 'F2' && selectedIds.length === 1) {
         e.preventDefault()
         setEditingNameId(selectedIds[0])
-      } else if (e.key === '+' || e.key === '=' || (e.key === '+' && e.shiftKey)) {
+      } else if (code === 'Equal' || code === 'NumpadAdd') {
         zoomBy(1.25)
-      } else if (e.key === '-') {
+      } else if (code === 'Minus' || code === 'NumpadSubtract') {
         zoomBy(1 / 1.25)
-      } else if (!mod) {
-        const t = TOOLS.find((k) => k.key === e.key.toLowerCase())
+      } else if (!mod && letter) {
+        const t = TOOLS.find((k) => k.key === letter)
         if (t) setTool(t.id)
       }
     }
@@ -781,6 +903,7 @@ export default function App() {
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
         onMouseDown={(e) => e.button === 1 && e.preventDefault()}
+        onContextMenu={openContextMenu}
         onDoubleClick={(e) => {
           const el = e.target.closest('[data-shape]')
           if (el) {
@@ -994,6 +1117,28 @@ export default function App() {
                 <label className="prop-label">Позиция</label>
                 <span className="dim mono">{Math.round(selected.x)}, {Math.round(selected.y)}</span>
               </div>
+              {selectedIds.length > 1 && (
+                <>
+                  <div className="prop-row align-row">
+                    <label className="prop-label">Выровнять</label>
+                    <div className="align-grid">
+                      <button title="По левому краю" onClick={() => alignSel('left')}>⇤</button>
+                      <button title="По центру (гориз.)" onClick={() => alignSel('center-x')}>⇤⇥</button>
+                      <button title="По правому краю" onClick={() => alignSel('right')}>⇥</button>
+                      <button title="По верхнему краю" onClick={() => alignSel('top')}>⇧</button>
+                      <button title="По центру (верт.)" onClick={() => alignSel('center-y')}>⇅</button>
+                      <button title="По нижнему краю" onClick={() => alignSel('bottom')}>⇩</button>
+                    </div>
+                  </div>
+                  <div className="prop-row">
+                    <label className="prop-label">Распределить</label>
+                    <div className="align-grid two">
+                      <button disabled={rootIds.length < 3} title="Равномерно по горизонтали" onClick={() => alignSel('dist-x')}>⇤⇥</button>
+                      <button disabled={rootIds.length < 3} title="Равномерно по вертикали" onClick={() => alignSel('dist-y')}>⇧⇩</button>
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="prop-row">
                 <label className="prop-label">Размер</label>
                 <span className="dim mono">{Math.round(selected.w)} × {Math.round(selected.h)}</span>
@@ -1105,6 +1250,8 @@ export default function App() {
                 <div className="help-row"><span>Копировать</span><kbd>Ctrl+C</kbd></div>
                 <div className="help-row"><span>Вырезать</span><kbd>Ctrl+X</kbd></div>
                 <div className="help-row"><span>Вставить</span><kbd>Ctrl+V</kbd></div>
+                <div className="help-row"><span>Выделить всё</span><kbd>Ctrl+A</kbd></div>
+                <div className="help-row"><span>Контекстное меню</span><kbd>ПКМ</kbd></div>
                 <div className="help-row"><span>Дубликат</span><kbd>Ctrl+D</kbd></div>
                 <div className="help-row"><span>Удалить</span><kbd>Del</kbd></div>
                 <div className="help-row"><span>Сдвиг (Shift — на 10px)</span><kbd>Стрелки</kbd></div>
@@ -1119,6 +1266,55 @@ export default function App() {
             <p className="help-note">Нажмите Esc или кликните вне окна, чтобы закрыть.</p>
           </div>
         </div>
+      )}
+
+      {ctxMenu && (
+        <>
+          <div
+            className="ctx-scrim"
+            onClick={() => setCtxMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setCtxMenu(null)
+            }}
+          />
+          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            {ctxMenu.onShape ? (
+              <>
+                {selected?.type === 'text' && !editingId && (
+                  <CtxItem
+                    label="Редактировать текст"
+                    hint="Enter"
+                    onClick={() => {
+                      setEditingId(selected.id)
+                      setCtxMenu(null)
+                    }}
+                  />
+                )}
+                <CtxItem label="Копировать" hint="Ctrl+C" onClick={() => { copySel(); setCtxMenu(null) }} />
+                <CtxItem label="Вырезать" hint="Ctrl+X" onClick={() => { cutSel(); setCtxMenu(null) }} />
+                <CtxItem label="Дубликат" hint="Ctrl+D" onClick={() => { duplicateSel(); setCtxMenu(null) }} />
+                <CtxItem label="На передний план" hint="]" onClick={() => { reorderSel(true); setCtxMenu(null) }} />
+                <CtxItem label="На задний план" hint="[" onClick={() => { reorderSel(false); setCtxMenu(null) }} />
+                <div className="ctx-sep" />
+                <CtxItem label="Удалить" hint="Del" danger onClick={() => { deleteSel(); setCtxMenu(null) }} />
+              </>
+            ) : (
+              <>
+                <CtxItem
+                  label="Вставить"
+                  hint="Ctrl+V"
+                  disabled={!clipboard.length}
+                  onClick={() => { pasteClip(); setCtxMenu(null) }}
+                />
+                <CtxItem label="Выделить всё" hint="Ctrl+A" onClick={() => { selectAll(); setCtxMenu(null) }} />
+                <div className="ctx-sep" />
+                <CtxItem label="Сброс вида" hint="Ctrl+0" onClick={() => { fitView(); setCtxMenu(null) }} />
+                <CtxItem label="Горячие клавиши" hint="?" onClick={() => { setShowHelp(true); setCtxMenu(null) }} />
+              </>
+            )}
+          </div>
+        </>
       )}
     </div>
   )
@@ -1141,4 +1337,17 @@ function layerTree(shapes) {
   }
   walk(null, 0)
   return rows
+}
+
+function CtxItem({ label, hint, onClick, disabled, danger }) {
+  return (
+    <button
+      className={danger ? 'ctx-item danger' : 'ctx-item'}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span>{label}</span>
+      {hint && <kbd>{hint}</kbd>}
+    </button>
+  )
 }
