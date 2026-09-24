@@ -37,6 +37,7 @@ const CURSOR_COLORS = ['#ec4899', '#0abab5', '#f59e0b', '#8b5cf6', '#22c55e', '#
 
 let seq = 0
 const uid = () => `s${Date.now().toString(36)}-${(seq++).toString(36)}`
+let clipboard = []
 const clientId = `c${Math.random().toString(36).slice(2, 8)}`
 const myName = `Гость-${Math.floor(Math.random() * 90) + 10}`
 const myColor = CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]
@@ -154,6 +155,7 @@ export default function App() {
   const [marquee, setMarquee] = useState(null)
   const [editingId, setEditingId] = useState(null)
   const [editingNameId, setEditingNameId] = useState(null)
+  const [showHelp, setShowHelp] = useState(false)
   const [peers, setPeers] = useState({})
 
   const stageRef = useRef(null)
@@ -549,6 +551,10 @@ export default function App() {
           ce.blur()
           return
         }
+        if (showHelp) {
+          setShowHelp(false)
+          return
+        }
         setEditingId(null)
         setSelectedIds([])
         setTool('select')
@@ -589,6 +595,69 @@ export default function App() {
         pushHistory(shapes)
         setShapes(shapes.filter((s) => !ids.has(s.id)))
         setSelectedIds([])
+      } else if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'x')) {
+        e.preventDefault()
+        if (selectedIds.length) {
+          const keep = withDescendants(shapes, selectedIds)
+          clipboard = shapes.filter((s) => keep.has(s.id))
+          if (e.key.toLowerCase() === 'x') {
+            pushHistory(shapes)
+            setShapes(shapes.filter((s) => !keep.has(s.id)))
+            setSelectedIds([])
+          }
+        }
+      } else if (mod && e.key.toLowerCase() === 'v') {
+        e.preventDefault()
+        if (clipboard.length) {
+          pushHistory(shapes)
+          const idMap = new Map(clipboard.map((s) => [s.id, uid()]))
+          const clones = clipboard.map((s) => ({
+            ...s,
+            id: idMap.get(s.id),
+            x: s.x + 24,
+            y: s.y + 24,
+            parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
+          }))
+          setShapes([...shapes, ...clones])
+          setSelectedIds(clones.map((s) => s.id))
+        }
+      } else if (e.key === '?') {
+        e.preventDefault()
+        setShowHelp((v) => !v)
+      } else if (e.key === 'Enter' && selectedIds.length === 1 && !editingId) {
+        const s = shapes.find((k) => k.id === selectedIds[0])
+        if (s && s.type === 'text') {
+          setEditingId(s.id)
+          return
+        }
+        if (selected.type === 'frame' || shapes.some((k) => k.id === selectedIds[0])) {
+          setEditingNameId(selectedIds[0])
+        }
+      } else if (selectedIds.length && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+        e.preventDefault()
+        const step = e.shiftKey ? 10 : 1
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+        if (!e.repeat || step > 1 || performance.now() - lastPushRef.current > 40) {
+          pushHistory(shapes)
+        }
+        const ids = withDescendants(shapes, selectedIds)
+        setShapes((cur) =>
+          cur.map((s) => (ids.has(s.id) ? { ...s, x: s.x + dx, y: s.y + dy } : s)),
+        )
+      } else if ((e.key === ']' || e.key === '[') && selectedIds.length) {
+        pushHistory(shapes)
+        const set = new Set(withDescendants(shapes, selectedIds))
+        const rest = shapes.filter((s) => !set.has(s.id))
+        const moved = shapes.filter((s) => set.has(s.id))
+        setShapes(e.key === ']' ? [...rest, ...moved] : [...moved, ...rest])
+      } else if (e.key === 'F2' && selectedIds.length === 1) {
+        e.preventDefault()
+        setEditingNameId(selectedIds[0])
+      } else if (e.key === '+' || e.key === '=' || (e.key === '+' && e.shiftKey)) {
+        zoomBy(1.25)
+      } else if (e.key === '-') {
+        zoomBy(1 / 1.25)
       } else if (!mod) {
         const t = TOOLS.find((k) => k.key === e.key.toLowerCase())
         if (t) setTool(t.id)
@@ -680,6 +749,7 @@ export default function App() {
         <span className="top-hint" title="Совместная работа: откройте страницу в ещё одной вкладке — правки и курсоры синхронизируются">
           <span className="collab-dot" /> {peerList.length} соавтор(ов) онлайн
         </span>
+        <button className="top-btn" onClick={() => setShowHelp(true)} title="Горячие клавиши (?)">⌨ Шорткаты</button>
         <button className="top-btn export" onClick={() => exportToPng(shapes)} title="Скачать холст как PNG">
           Экспорт PNG
         </button>
@@ -998,6 +1068,58 @@ export default function App() {
           </div>
         </div>
       </aside>
+
+      {showHelp && (
+        <div className="help-overlay" onClick={() => setShowHelp(false)}>
+          <div className="help-modal" onClick={(e) => e.stopPropagation()}>
+            <header>
+              <h2>Горячие клавиши</h2>
+              <button className="icon-btn" onClick={() => setShowHelp(false)}>✕</button>
+            </header>
+            <div className="help-cols">
+              <div>
+                <h4>Инструменты</h4>
+                {[
+                  ['V', 'Выделение'],
+                  ['F', 'Фрейм'],
+                  ['R', 'Прямоугольник'],
+                  ['O', 'Эллипс'],
+                  ['T', 'Текст'],
+                  ['H', 'Рука'],
+                  ['Space (зажать)', 'Временный пан'],
+                ].map(([k, v]) => (
+                  <div className="help-row" key={k}>
+                    <span>{v}</span>
+                    <kbd>{k}</kbd>
+                  </div>
+                ))}
+                <h4>Вид</h4>
+                <div className="help-row"><span>Приблизить</span><kbd>+ / =</kbd></div>
+                <div className="help-row"><span>Отдалить</span><kbd>−</kbd></div>
+                <div className="help-row"><span>Сброс вида</span><kbd>Ctrl+0</kbd></div>
+                <div className="help-row"><span>Зум к курсору</span><kbd>Ctrl+Колесо</kbd></div>
+              </div>
+              <div>
+                <h4>Редактирование</h4>
+                <div className="help-row"><span>Отменить / Повторить</span><kbd>Ctrl+Z / Shift+Z</kbd></div>
+                <div className="help-row"><span>Копировать</span><kbd>Ctrl+C</kbd></div>
+                <div className="help-row"><span>Вырезать</span><kbd>Ctrl+X</kbd></div>
+                <div className="help-row"><span>Вставить</span><kbd>Ctrl+V</kbd></div>
+                <div className="help-row"><span>Дубликат</span><kbd>Ctrl+D</kbd></div>
+                <div className="help-row"><span>Удалить</span><kbd>Del</kbd></div>
+                <div className="help-row"><span>Сдвиг (Shift — на 10px)</span><kbd>Стрелки</kbd></div>
+                <div className="help-row"><span>Правка текста</span><kbd>Enter</kbd></div>
+                <h4>Слои</h4>
+                <div className="help-row"><span>Мультивыделение</span><kbd>Shift+Клик / рамка</kbd></div>
+                <div className="help-row"><span>На передний план</span><kbd>]</kbd></div>
+                <div className="help-row"><span>На задний план</span><kbd>[</kbd></div>
+                <div className="help-row"><span>Переименовать</span><kbd>F2</kbd></div>
+              </div>
+            </div>
+            <p className="help-note">Нажмите Esc или кликните вне окна, чтобы закрыть.</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
