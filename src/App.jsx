@@ -819,8 +819,10 @@ export default function App() {
         y: s.y + 24,
         parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
       }))
-    /* select clones of top-level selection */
-    const rootDups = clones.filter((c) => rootIds.includes(c.id)).map((c) => c.id)
+    /* Выделяем копии корней выделения. rootIds содержит исходные id, а у
+       клонов id новые — раньше сравнение всегда давало пустой результат,
+       и выделялось всё поддерево вместе с потомками. */
+    const rootDups = rootIds.map((oldId) => idMap.get(oldId)).filter(Boolean)
     setShapes((cur) => [...cur, ...clones])
     setSelectedIds(rootDups.length ? rootDups : clones.map((c) => c.id))
   }
