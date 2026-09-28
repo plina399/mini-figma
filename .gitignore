@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# секреты (реальные значения — только в .env, он не коммитится)
+.env
+.env.*
+!.env.example
+
+# временные файлы проверок
+*.tmp
+cdpres.txt
+lint-tmp.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
