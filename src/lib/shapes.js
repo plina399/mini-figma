@@ -61,6 +61,29 @@ export function normalizeShape(s) {
   }
 }
 
+/* Единая метрика текста: используется и холстом, и попаданием рамки,
+   и экспортом — иначе границы расходились и текст обрезался. */
+export const LINE_HEIGHT = 1.25
+
+export function textLines(s) {
+  return String(s.text ?? '').split('\n')
+}
+
+export function textHeight(s) {
+  return (s.fontSize || 32) * LINE_HEIGHT * Math.max(1, textLines(s).length)
+}
+
+/* приблизительная ширина строки: 0.55 кегля на символ */
+export function textWidthApprox(s) {
+  const size = s.fontSize || 32
+  return Math.max(24, ...textLines(s).map((l) => l.length * size * 0.55))
+}
+
+export function shapeRect(s) {
+  if (s.type !== 'text') return { x: s.x, y: s.y, w: s.w, h: s.h }
+  return { x: s.x, y: s.y, w: textWidthApprox(s), h: textHeight(s) }
+}
+
 export function getBounds(shapes) {
   let minX = Infinity
   let minY = Infinity
@@ -68,10 +91,11 @@ export function getBounds(shapes) {
   let maxY = -Infinity
 
   for (const s of shapes) {
-    minX = Math.min(minX, s.x)
-    minY = Math.min(minY, s.y)
-    maxX = Math.max(maxX, s.x + s.w)
-    maxY = Math.max(maxY, s.y + (s.type === 'text' ? (s.fontSize || 32) * 1.25 : s.h))
+    const r = shapeRect(s)
+    minX = Math.min(minX, r.x)
+    minY = Math.min(minY, r.y)
+    maxX = Math.max(maxX, r.x + r.w)
+    maxY = Math.max(maxY, r.y + r.h)
   }
 
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
@@ -97,18 +121,20 @@ export function exportToPng(shapes) {
     ctx.globalAlpha = s.opacity ?? 1
     ctx.fillStyle = s.fill
 
-    if (s.type === 'rect') {
+    if (s.type === 'rect' || s.type === 'frame') {
       ctx.fillRect(s.x, s.y, s.w, s.h)
     } else if (s.type === 'ellipse') {
       ctx.beginPath()
       ctx.ellipse(s.x + s.w / 2, s.y + s.h / 2, s.w / 2, s.h / 2, 0, 0, Math.PI * 2)
       ctx.fill()
     } else if (s.type === 'text') {
-      ctx.font = `${s.fontSize || 32}px system-ui, sans-serif`
+      /* шрифт берём тот же, что на холсте, иначе экспорт не совпадёт с видом */
+      const family = s.font && s.font !== 'system-ui' ? `"${s.font}", system-ui, sans-serif` : 'system-ui, sans-serif'
+      ctx.font = `${s.fontSize || 32}px ${family}`
       ctx.textBaseline = 'top'
-      const lineH = (s.fontSize || 32) * 1.25
+      const lineH = (s.fontSize || 32) * LINE_HEIGHT
       let lineY = s.y
-      for (const line of String(s.text || '').split('\n')) {
+      for (const line of textLines(s)) {
         ctx.fillText(line, s.x, lineY)
         lineY += lineH
       }

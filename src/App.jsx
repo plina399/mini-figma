@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
-import { MIN_SIZE, TYPE_LABELS, exportToPng, normalizeShape, sanitizeShapes, uid } from './lib/shapes'
+import {
+  LINE_HEIGHT,
+  MIN_SIZE,
+  TYPE_LABELS,
+  exportToPng,
+  normalizeShape,
+  sanitizeShapes,
+  shapeRect,
+  textHeight,
+  textWidthApprox,
+  uid,
+} from './lib/shapes'
 
 const TOOLS = [
   { id: 'select', label: 'Выделение', key: 'v' },
@@ -55,7 +66,7 @@ const makeShape = (type, pt, fill = '#ec4899') => {
   if (type === 'text') {
     s.text = 'Текст'
     s.fontSize = 32
-    s.h = s.fontSize * 1.25
+    s.h = s.fontSize * LINE_HEIGHT
     s.font = 'Inter'
   }
   return s
@@ -93,25 +104,8 @@ function safeHex(color) {
   return '#ec4899'
 }
 
-function hexA(hex, a) {
-  return `${safeHex(hex)}${Math.round(clamp(a, 0, 1) * 255).toString(16).padStart(2, '0')}`
-}
-
-/* appximate width of a text shape for marquee-hit-test and export bounds */
-function textWidthApprox(s) {
-  const lines = String(s.text || '').split('\n')
-  const size = s.fontSize || 32
-  return Math.max(24, ...lines.map((l) => l.length * size * 0.55))
-}
-
-function shapeRect(s) {
-  const w = s.type === 'text' ? textWidthApprox(s) : s.w
-  const h = s.type === 'text' ? (s.fontSize || 32) * 1.25 * String(s.text || ' ').split('\n').length : s.h
-  return { x: s.x, y: s.y, w, h }
-}
-
 function intersects(a, b) {
-  return a && b && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+  return Boolean(a) && Boolean(b) && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
 }
 
 /* collect a set consisting of ids plus all their descendants */
@@ -921,49 +915,52 @@ export default function App() {
 
   /* ---------------- shape ops ---------------- */
 
+  /* Функциональная форма setShapes: правки из соседних обработчиков
+     в одном тике React не должны затирать друг друга. */
   const updateSelected = (patch) => {
     if (!selected) return
+    const id = selected.id
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === selected.id ? { ...s, ...patch } : s)))
+    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, ...patch } : s)))
   }
 
   const updateMany = (patch) => {
     if (!selectedIds.length) return
+    const ids = new Set(selectedIds)
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (selectedIds.includes(s.id) ? { ...s, ...patch } : s)))
+    setShapes((cur) => cur.map((s) => (ids.has(s.id) ? { ...s, ...patch } : s)))
   }
 
   const toggleVisible = (id) => {
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === id ? { ...s, visible: s.visible === false } : s)))
+    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, visible: s.visible === false } : s)))
   }
 
   const renameShape = (id, name) => {
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === id ? { ...s, name } : s)))
+    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, name } : s)))
   }
 
   const deleteMany = (ids) => {
     const kill = withDescendants(shapes, ids)
     pushHistory(shapes)
-    setShapes(shapes.filter((s) => !kill.has(s.id)))
+    setShapes((cur) => cur.filter((s) => !kill.has(s.id)))
     setSelectedIds([])
   }
 
   const commitTextEdit = (id, newText) => {
-    const s = shapes.find((k) => k.id === id)
     setEditingId(null)
+    const s = shapes.find((k) => k.id === id)
     if (!s || (s.text || '') === (newText || '')) return
     pushHistory(shapes)
-    const lines = Math.max(1, String(newText).split('\n').length)
-    setShapes(
-      shapes.map((k) =>
-        k.id === id
-          ? { ...k, text: newText, h: (k.fontSize || 32) * 1.25 * lines, w: Math.max(k.w, textWidthApprox({ ...k, text: newText })) }
-          : k,
-      ),
+    /* функциональная форма: не затираем правки, случившиеся в этом же тике */
+    setShapes((cur) =>
+      cur.map((k) => {
+        if (k.id !== id) return k
+        const next = { ...k, text: newText }
+        return { ...next, h: textHeight(next), w: Math.max(k.w, textWidthApprox(next)) }
+      }),
     )
-    editingTextRef.current = null
   }
 
   /* ---------------- render ---------------- */
@@ -1211,7 +1208,9 @@ export default function App() {
                 />
                 <span className="dim mono">{Math.round(selected.opacity * 100)}%</span>
               </div>
-              {selected.type === 'text' && (
+              {/* шрифт и кегль — только при одиночном выборе: иначе правили бы
+                  только последний объект, в отличие от заливки и прозрачности */}
+              {selected.type === 'text' && selectedIds.length === 1 && (
                 <>
                   <div className="prop-row">
                     <label className="prop-label" htmlFor="font-input">Шрифт</label>
