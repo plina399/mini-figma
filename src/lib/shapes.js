@@ -84,6 +84,32 @@ export function shapeRect(s) {
   return { x: s.x, y: s.y, w: textWidthApprox(s), h: textHeight(s) }
 }
 
+/* Фигуры, которые видны на холсте: без скрытых и без содержимого скрытых
+   родителей. Отрисовка плоская, поэтому own-флаг у потомка не учитывает
+   скрытый фрейм, в который он вложен. */
+export function visibleShapes(shapes) {
+  const hidden = new Set()
+  for (const s of shapes) {
+    if (s.visible !== false) continue
+    hidden.add(s.id)
+    for (const other of shapes) {
+      if (other.parentId === s.id) hidden.add(other.id)
+    }
+  }
+  /* закрываем цепочки произвольной глубины: ребёнок скрытого внука */
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const s of shapes) {
+      if (s.parentId && hidden.has(s.parentId) && !hidden.has(s.id)) {
+        hidden.add(s.id)
+        changed = true
+      }
+    }
+  }
+  return shapes.filter((s) => !hidden.has(s.id))
+}
+
 export function getBounds(shapes) {
   let minX = Infinity
   let minY = Infinity
@@ -102,19 +128,25 @@ export function getBounds(shapes) {
 }
 
 export function exportToPng(shapes) {
-  const visible = shapes.filter((s) => s.visible !== false)
+  const visible = visibleShapes(shapes)
   if (!visible.length) return
 
   const b = getBounds(visible)
   const pad = 32
   const scale = 2
 
+  /* Браузер не может отдать canvas шире ~32k px: габариты уменьшаем
+     пропорционально, иначе toDataURL вернёт пустую картинку. */
+  const MAX_SIDE = 16384
+  const longest = Math.max(b.w + pad * 2, b.h + pad * 2)
+  const fit = longest > MAX_SIDE ? MAX_SIDE / longest : 1
+
   const canvas = document.createElement('canvas')
-  canvas.width = Math.ceil((b.w + pad * 2) * scale)
-  canvas.height = Math.ceil((b.h + pad * 2) * scale)
+  canvas.width = Math.max(1, Math.ceil((b.w + pad * 2) * scale * fit))
+  canvas.height = Math.max(1, Math.ceil((b.h + pad * 2) * scale * fit))
 
   const ctx = canvas.getContext('2d')
-  ctx.scale(scale, scale)
+  ctx.scale(scale * fit, scale * fit)
   ctx.translate(pad - b.x, pad - b.y)
 
   for (const s of visible) {

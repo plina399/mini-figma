@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import {
   LINE_HEIGHT,
@@ -139,6 +139,29 @@ function intersects(a, b) {
   return Boolean(a) && Boolean(b) && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
 }
 
+/* Множество фигур, которые не видно на холсте: сами скрытые и всё, что
+   лежит внутри скрытого родителя. Фигуры рисуются плоским списком, а не
+   вложенно в фрейм, поэтому одного own-флага у потомка недостаточно. */
+function hiddenShapeIds(shapes) {
+  const childrenOf = new Map()
+  for (const s of shapes) {
+    if (!s.parentId) continue
+    if (!childrenOf.has(s.parentId)) childrenOf.set(s.parentId, [])
+    childrenOf.get(s.parentId).push(s.id)
+  }
+  const hidden = new Set()
+  const stack = []
+  for (const s of shapes) if (s.visible === false) stack.push(s.id)
+  /* обход в ширину по дереву: каждый id попадает в стек один раз */
+  while (stack.length) {
+    const id = stack.pop()
+    if (hidden.has(id)) continue
+    hidden.add(id)
+    for (const childId of childrenOf.get(id) || []) stack.push(childId)
+  }
+  return hidden
+}
+
 /* collect a set consisting of ids plus all their descendants */
 function withDescendants(shapes, ids) {
   const out = new Set(ids)
@@ -245,6 +268,8 @@ export default function App() {
   }, [shapes])
 
   const selected = shapes.find((s) => s.id === selectedIds[selectedIds.length - 1]) || null
+
+  const hiddenIds = useMemo(() => hiddenShapeIds(shapes), [shapes])
 
   /* Пишем с дебаунсом: перетаскивание фигуры даёт десятки обновлений в
      секунду, а в хранилище полезно складывать только устоявшееся. */
@@ -630,7 +655,7 @@ export default function App() {
       if (marquee && (marquee.w > 3 || marquee.h > 3)) {
         const rect = { x: marquee.x, y: marquee.y, w: marquee.w, h: marquee.h }
         const hit = shapes
-          .filter((s) => s.visible !== false)
+          .filter((s) => !hiddenIds.has(s.id))
           .map((s) => ({ s, r: shapeRect(s) }))
           .filter(({ r }) => intersects(r, rect))
           .map(({ s }) => s.id)
@@ -808,7 +833,7 @@ export default function App() {
   const selectAll = () => {
     setSelectedIds(
       shapes
-        .filter((s) => s.visible !== false && !(s.parentId && shapes.some((k) => k.id === s.parentId)))
+        .filter((s) => !hiddenIds.has(s.id) && !(s.parentId && shapes.some((k) => k.id === s.parentId)))
         .map((s) => s.id),
     )
   }
@@ -1150,7 +1175,7 @@ export default function App() {
           style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
         >
           {shapes.map((s) =>
-            s.visible === false ? null : (
+            hiddenIds.has(s.id) ? null : (
               <div
                 key={s.id}
                 data-shape={s.id}
