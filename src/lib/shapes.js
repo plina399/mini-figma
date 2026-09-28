@@ -9,6 +9,18 @@ const TYPES = new Set(Object.keys(TYPE_LABELS))
 let seq = 0
 export const uid = () => `s${Date.now().toString(36)}-${(seq++).toString(36)}`
 
+/* Пределы на присланные данные. Данные приходят из BroadcastChannel, то есть
+   доступны любому скрипту на этом же origin: без ограничений огромный текст
+   или тысячи фигур роняли рендер (RangeError в Math.max по spread). */
+export const LIMITS = {
+  shapes: 2000,
+  textChars: 8000,
+  nameChars: 120,
+  fontChars: 80,
+  idChars: 64,
+  coord: 1e6,
+}
+
 /* Приводит присланный по сети список фигур к безопасному виду: выкидывает
    мусор, чинит числовые поля и гарантирует уникальные строковые id.
    Возвращает null, если это не массив. */
@@ -16,32 +28,36 @@ export function sanitizeShapes(list) {
   if (!Array.isArray(list)) return null
 
   const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d)
+  const coord = (v) => Math.min(LIMITS.coord, Math.max(-LIMITS.coord, num(v, 0)))
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '')
   const seen = new Set()
   const out = []
 
   for (const raw of list) {
+    if (out.length >= LIMITS.shapes) break
     if (!raw || typeof raw !== 'object' || !TYPES.has(raw.type)) continue
-    if (typeof raw.id !== 'string' || !raw.id || seen.has(raw.id)) continue
+    if (typeof raw.id !== 'string' || !raw.id || raw.id.length > LIMITS.idChars) continue
+    if (seen.has(raw.id)) continue
 
     const min = raw.type === 'text' ? 1 : MIN_SIZE
     const s = {
       id: raw.id,
       type: raw.type,
-      x: num(raw.x, 0),
-      y: num(raw.y, 0),
-      w: Math.max(min, num(raw.w, min)),
-      h: Math.max(min, num(raw.h, min)),
-      fill: typeof raw.fill === 'string' ? raw.fill : '#ec4899',
+      x: coord(raw.x),
+      y: coord(raw.y),
+      w: Math.max(min, Math.min(LIMITS.coord, num(raw.w, min))),
+      h: Math.max(min, Math.min(LIMITS.coord, num(raw.h, min))),
+      fill: str(raw.fill, 64) || '#ec4899',
       opacity: Math.min(1, Math.max(0, num(raw.opacity, 1))),
       visible: raw.visible !== false,
       parentId: typeof raw.parentId === 'string' ? raw.parentId : null,
-      name: typeof raw.name === 'string' && raw.name ? raw.name : TYPE_LABELS[raw.type],
+      name: str(raw.name, LIMITS.nameChars) || TYPE_LABELS[raw.type],
     }
 
     if (raw.type === 'text') {
-      s.text = typeof raw.text === 'string' ? raw.text : ''
+      s.text = str(raw.text, LIMITS.textChars)
       s.fontSize = Math.min(200, Math.max(8, num(raw.fontSize, 32)))
-      s.font = typeof raw.font === 'string' ? raw.font : 'Inter'
+      s.font = str(raw.font, LIMITS.fontChars) || 'Inter'
       /* w/h текста — производные от содержимого, принятые извне значения
          игнорируем: иначе ресайз считал бы масштаб от чужой ширины. */
       Object.assign(s, withTextMetrics(s))
@@ -76,10 +92,17 @@ export function textHeight(s) {
   return (s.fontSize || 32) * LINE_HEIGHT * Math.max(1, textLines(s).length)
 }
 
-/* приблизительная ширина строки: 0.55 кегля на символ */
+/* приблизительная ширина строки: 0.55 кегля на символ.
+   Считаем циклом, а не Math.max(...spread): текст с десятками тысяч строк
+   разворачивал аргументы и ронял рендер с RangeError. */
 export function textWidthApprox(s) {
   const size = s.fontSize || 32
-  return Math.max(24, ...textLines(s).map((l) => l.length * size * 0.55))
+  let max = 0
+  for (const line of textLines(s)) {
+    const w = line.length * size * 0.55
+    if (w > max) max = w
+  }
+  return Math.max(24, max)
 }
 
 /* У текста размеры выводятся из содержимого и кегля, поэтому держим w/h
