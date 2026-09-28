@@ -31,6 +31,8 @@ const FONTS = [
 
 const CURSOR_COLORS = ['#ec4899', '#0abab5', '#f59e0b', '#8b5cf6', '#22c55e', '#3b82f6']
 
+const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
+
 let clipboard = []
 const clientId = `c${Math.random().toString(36).slice(2, 8)}`
 const myName = `Гость-${Math.floor(Math.random() * 90) + 10}`
@@ -548,6 +550,13 @@ export default function App() {
 
   /* ---------------- zoom / pan via wheel ---------------- */
 
+  /* Слушатель колеса подписан один раз: актуальные zoom/pan берём из ref,
+     иначе эффект переподписывался бы на каждом тике колеса. */
+  const viewRef = useRef({ zoom, pan })
+  useEffect(() => {
+    viewRef.current = { zoom, pan }
+  }, [zoom, pan])
+
   useEffect(() => {
     const el = stageRef.current
     if (!el) return
@@ -556,25 +565,29 @@ export default function App() {
       const r = el.getBoundingClientRect()
       const sx = e.clientX - r.left
       const sy = e.clientY - r.top
+      const { zoom: z0, pan: p0 } = viewRef.current
       if (e.ctrlKey || e.metaKey) {
-        const nz = clampZoom(zoom * Math.exp(-e.deltaY * 0.0015))
-        setPan({ x: sx - ((sx - pan.x) / zoom) * nz, y: sy - ((sy - pan.y) / zoom) * nz })
+        const nz = clampZoom(z0 * Math.exp(-e.deltaY * 0.0015))
+        viewRef.current = { zoom: nz, pan: { x: sx - ((sx - p0.x) / z0) * nz, y: sy - ((sy - p0.y) / z0) * nz } }
         setZoom(nz)
+        setPan(viewRef.current.pan)
       } else {
         const k = e.deltaMode === 1 ? 16 : 1
-        setPan({ x: pan.x - e.deltaX * k, y: pan.y - e.deltaY * k })
+        const next = { x: p0.x - e.deltaX * k, y: p0.y - e.deltaY * k }
+        viewRef.current = { zoom: z0, pan: next }
+        setPan(next)
       }
     }
     el.addEventListener('wheel', fn, { passive: false })
     return () => el.removeEventListener('wheel', fn)
-  }, [zoom, pan])
+  }, [])
 
   const zoomBy = (factor) => setZoom((z) => clampZoom(z * factor))
   const fitView = () => {
+    viewRef.current = { zoom: 1, pan: { x: 60, y: 40 } }
     setZoom(1)
     setPan({ x: 60, y: 40 })
   }
-  const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
 
   /* ---------------- shared actions (keyboard + context menu) ---------------- */
 
@@ -736,8 +749,22 @@ export default function App() {
 
   /* ---------------- keyboard ---------------- */
 
+  /* Обработчики клавиатуры читают актуальное состояние через kbRef и
+     подписаны один раз: так список не пересоздаётся на каждом рендере
+     (иначе событие может пропасть между remove/add во время drag'а). */
+  const kbRef = useRef(null)
+  useEffect(() => {
+    kbRef.current = {
+      undo, redo, zoomBy, fitView, selectAll, copySel, cutSel,
+      pasteClip, duplicateSel, deleteSel, nudge, reorderSel,
+      shapes, selectedIds, editingId,
+    }
+  })
+
   useEffect(() => {
     const onDown = (e) => {
+      const k = kbRef.current
+      if (!k) return
       if (e.key === 'Escape') {
         const ce = document.activeElement
         if (ce && ce.isContentEditable) {
@@ -751,7 +778,9 @@ export default function App() {
         setTool('select')
         return
       }
-      if (e.target.closest('input, textarea, [contenteditable="true"]')) {
+      /* e.target — не всегда элемент (окно/документ): closest есть не у всех */
+      const target = e.target instanceof Element ? e.target : null
+      if (target && target.closest('input, textarea, [contenteditable="true"]')) {
         if (e.key === 'Enter' && e.target.isContentEditable) e.target.blur()
         return
       }
@@ -765,54 +794,54 @@ export default function App() {
 
       if (mod && letter === 'z') {
         e.preventDefault()
-        if (e.shiftKey) redo()
-        else undo()
+        if (e.shiftKey) k.redo()
+        else k.undo()
       } else if (mod && letter === 'y') {
         e.preventDefault()
-        redo()
+        k.redo()
       } else if (mod && code === 'Digit0') {
         e.preventDefault()
-        fitView()
+        k.fitView()
       } else if (mod && letter === 'a') {
         e.preventDefault()
-        if (!editingId) selectAll()
+        if (!k.editingId) k.selectAll()
       } else if (mod && letter === 'd') {
         e.preventDefault()
-        duplicateSel()
-      } else if ((code === 'Delete' || code === 'Backspace') && selectedIds.length && !editingId) {
+        k.duplicateSel()
+      } else if ((code === 'Delete' || code === 'Backspace') && k.selectedIds.length && !k.editingId) {
         e.preventDefault()
-        deleteSel()
+        k.deleteSel()
       } else if (mod && (letter === 'c' || letter === 'x')) {
         e.preventDefault()
-        if (letter === 'x') cutSel()
-        else copySel()
+        if (letter === 'x') k.cutSel()
+        else k.copySel()
       } else if (mod && letter === 'v') {
         e.preventDefault()
-        pasteClip()
+        k.pasteClip()
       } else if (e.key === '?' || (e.shiftKey && code === 'Slash')) {
         e.preventDefault()
         setShowHelp((v) => !v)
-      } else if (e.key === 'Enter' && selectedIds.length === 1 && !editingId) {
-        const s = shapes.find((k) => k.id === selectedIds[0])
+      } else if (e.key === 'Enter' && k.selectedIds.length === 1 && !k.editingId) {
+        const s = k.shapes.find((x) => x.id === k.selectedIds[0])
         if (s && s.type === 'text') setEditingId(s.id)
         else if (s) setEditingNameId(s.id)
-      } else if (selectedIds.length && code.startsWith('Arrow')) {
+      } else if (k.selectedIds.length && code.startsWith('Arrow')) {
         e.preventDefault()
         const step = e.shiftKey ? 10 : 1
         const dx = code === 'ArrowLeft' ? -step : code === 'ArrowRight' ? step : 0
         const dy = code === 'ArrowUp' ? -step : code === 'ArrowDown' ? step : 0
-        nudge(dx, dy)
-      } else if (code === 'BracketRight' && selectedIds.length) {
-        reorderSel(true)
-      } else if (code === 'BracketLeft' && selectedIds.length) {
-        reorderSel(false)
-      } else if (code === 'F2' && selectedIds.length === 1) {
+        k.nudge(dx, dy)
+      } else if (code === 'BracketRight' && k.selectedIds.length) {
+        k.reorderSel(true)
+      } else if (code === 'BracketLeft' && k.selectedIds.length) {
+        k.reorderSel(false)
+      } else if (code === 'F2' && k.selectedIds.length === 1) {
         e.preventDefault()
-        setEditingNameId(selectedIds[0])
+        setEditingNameId(k.selectedIds[0])
       } else if (code === 'Equal' || code === 'NumpadAdd') {
-        zoomBy(1.25)
+        k.zoomBy(1.25)
       } else if (code === 'Minus' || code === 'NumpadSubtract') {
-        zoomBy(1 / 1.25)
+        k.zoomBy(1 / 1.25)
       } else if (!mod && letter) {
         const t = TOOLS.find((k) => k.key === letter)
         if (t) setTool(t.id)
@@ -827,7 +856,7 @@ export default function App() {
       window.removeEventListener('keydown', onDown)
       window.removeEventListener('keyup', onUp)
     }
-  })
+  }, [])
 
   /* ---------------- shape ops ---------------- */
 
