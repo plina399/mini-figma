@@ -200,13 +200,16 @@
   max-width: none;
 }
 
+/* Поле правки повторяет вид фигуры: тот же кегль, цвет заливки и
+   межстрочный интервал. Раньше кегль и цвет были зашиты в CSS, поэтому
+   при входе в правку текст скакал с 32px на 13px и терял свой цвет. */
 .text-edit {
   min-width: 24px;
   outline: 1.5px dashed var(--accent);
   outline-offset: 3px;
   cursor: text;
   white-space: pre-wrap;
-  color: #fafafa;
+  line-height: 1.25;
 }
 
 .handle {

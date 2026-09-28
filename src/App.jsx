@@ -1198,6 +1198,7 @@ export default function App() {
                       className="text-edit"
                       contentEditable
                       ref={textEditRef}
+                      style={{ color: s.fill, fontSize: s.fontSize }}
                       onBlur={(e) => commitTextEdit(s.id, e.target.textContent)}
                       onKeyDown={(e) => {
                         e.stopPropagation()
