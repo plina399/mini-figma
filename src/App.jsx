@@ -203,6 +203,10 @@ export default function App() {
   const shapesRef = useRef(shapes)
   const dirtyRef = useRef(false)
   const lastRemoteRef = useRef(null)
+  const textEditRef = useRef(null)
+  /* Значение, которое последний раз записали в поле правки. По нему решаем,
+     обновлять ли DOM: пользовательский набор с s.text расходится намеренно. */
+  const writtenTextRef = useRef(null)
 
   useEffect(() => {
     shapesRef.current = shapes
@@ -286,6 +290,37 @@ export default function App() {
   useEffect(() => {
     for (const s of shapes) if (s.type === 'text' && s.font) ensureFont(s.font)
   }, [shapes])
+
+  /* ---------------- text editing ---------------- */
+
+  /* Фигура, которую сейчас правят: та же самая ссылка, пока документ
+     не изменился. Благодаря этому эффект ниже не перезапускается на
+     каждой перерисовке холста. */
+  const editingShape = shapes.find((s) => s.id === editingId && s.type === 'text') || null
+
+  /* При открытии редактора поле пустое — считаем, что писать нужно заново. */
+  useEffect(() => {
+    writtenTextRef.current = null
+  }, [editingId])
+
+  /* Синхронизируем поле правки с текстом фигуры, но только когда s.text
+     действительно изменился (правка пришла из другой вкладки). Раньше здесь
+     стоял ref-колбэк, который пересоздавался на каждом рендере и возвращал
+     поле к последнему сохранённому тексту — набранный текст пропадал. */
+  useEffect(() => {
+    const el = textEditRef.current
+    if (!editingShape || !el) return
+    if (writtenTextRef.current !== editingShape.text) {
+      writtenTextRef.current = editingShape.text
+      if (el.textContent !== editingShape.text) el.textContent = editingShape.text
+    }
+    /* contentEditable не получает фокус сам — ставим его и каретку,
+       иначе печатать нельзя без лишнего клика */
+    if (document.activeElement !== el) {
+      el.focus()
+      placeCaretEnd(el)
+    }
+  }, [editingShape])
 
   /* drop stale peer cursors */
   useEffect(() => {
@@ -1102,16 +1137,7 @@ export default function App() {
                     <div
                       className="text-edit"
                       contentEditable
-                      ref={(el) => {
-                        if (!el) return
-                        if (el.textContent !== (s.text || '')) el.textContent = s.text || ''
-                        /* contentEditable не получает фокус сам — ставим его и каретку,
-                           иначе печатать нельзя без лишнего клика */
-                        if (document.activeElement !== el) {
-                          el.focus()
-                          placeCaretEnd(el)
-                        }
-                      }}
+                      ref={textEditRef}
                       onBlur={(e) => commitTextEdit(s.id, e.target.textContent)}
                       onKeyDown={(e) => {
                         e.stopPropagation()
