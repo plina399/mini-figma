@@ -235,6 +235,10 @@ export default function App() {
   /* Значение, которое последний раз записали в поле правки. По нему решаем,
      обновлять ли DOM: пользовательский набор с s.text расходится намеренно. */
   const writtenTextRef = useRef(null)
+  /* Nonce нашего запроса документа. Пока он не погашен, берём ответ только
+     от одной вкладки: иначе новая вкладка применяла документы в порядке
+     доставки, и итог зависел от того, кто ответил быстрее. */
+  const helloNonceRef = useRef(uid())
 
   useEffect(() => {
     shapesRef.current = shapes
@@ -261,14 +265,32 @@ export default function App() {
       if (msg.type === 'shapes') {
         const clean = sanitizeShapes(msg.shapes)
         if (!clean) return
+        /* Ответ на наш запрос документа: берём первый и гасим nonce,
+           чтобы приход остальных ответов уже ничего не менял. */
+        if (typeof msg.to === 'string') {
+          if (msg.to !== helloNonceRef.current) return
+          helloNonceRef.current = null
+          /* Документ подменён целиком — история и выделение к прежнему
+             документу не относятся, откатывать их бессмысленно. */
+          setPast([])
+          setFuture([])
+          setSelectedIds([])
+        }
         lastRemoteRef.current = clean
         setShapes(clean)
         return
       }
 
       if (msg.type === 'hello') {
-        /* новая вкладка просит актуальный документ — отдаём свой */
-        chan.postMessage({ type: 'shapes', shapes: shapesRef.current, clientId: clientId })
+        /* новая вкладка просит актуальный документ — отдаём свой,
+           помечав ответ, чтобы запросивший взял именно его */
+        if (typeof msg.nonce !== 'string' || !msg.nonce) return
+        chan.postMessage({
+          type: 'shapes',
+          shapes: shapesRef.current,
+          clientId: clientId,
+          to: msg.nonce,
+        })
         return
       }
 
@@ -298,7 +320,8 @@ export default function App() {
       }
     }
     /* спросим у уже открытых вкладок их документ, прежде чем брать дефолтный */
-    chan.postMessage({ type: 'hello', clientId: clientId })
+    const nonce = helloNonceRef.current
+    chan.postMessage({ type: 'hello', clientId: clientId, nonce: nonce })
     const bye = () => chan.postMessage({ type: 'bye', client: clientId })
     window.addEventListener('beforeunload', bye)
     return () => {
