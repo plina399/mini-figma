@@ -191,6 +191,13 @@
   cursor: default;
 }
 
+/* .world — абсолютный слой без размеров, поэтому текстовая фигура
+   без явной ширины сжимается до самого длинного слова и переносится */
+.shape.text {
+  width: max-content;
+  max-width: none;
+}
+
 .text-edit {
   min-width: 24px;
   outline: 1.5px dashed var(--accent);
