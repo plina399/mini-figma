@@ -1,18 +1,62 @@
-# React + Vite
+# mini-figma
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Мини-редактор векторной графики в браузере: холст, фигуры, текст, фреймы,
+слои, история правок, горячие клавиши, экспорт в PNG и совместная работа
+между вкладками. Учебный проект на React 19 + Vite.
 
-Currently, two official plugins are available:
+## Возможности
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Инструменты:** выделение, фрейм, прямоугольник, эллипс, текст, рука.
+  Горячие клавиши: `V` `F` `R` `O` `T` `H`, `Space` — временный пан.
+- **Холст:** зум колесом с `Ctrl` (к курсору) и панорамирование колесом,
+  точки расстановки, рамка выделения.
+- **Фигуры:** перемещение, ресайз за углы, мультивыделение
+  (`Shift`+клик или рамка), авто-родительство при броскании во фрейм.
+- **Слои:** дерево с вложенностью, переименование (`F2`), скрытие, удаление.
+- **Правки:** заливка, прозрачность, шрифт и кегль текста, выравнивание
+  и распределение по мультивыделению.
+- **История:** `Ctrl+Z` / `Ctrl+Shift+Z`, до 60 шагов, серии действий склеиваются.
+- **Совместная работа:** правки и курсоры синхронизируются между вкладками
+  одного браузера через `BroadcastChannel`. Новая вкладка забирает документ
+  у уже открытых, а не затирает его.
+- **Экспорт PNG** содержимое холста в файл `mini-figma.png`.
 
-## React Compiler
+## Запуск
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npm run dev      # http://localhost:5173/mini-figma/
+```
 
-## Expanding the Oxlint configuration
+Сборка и проверки:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```bash
+npm run build    # сборка в dist/
+npm run lint     # oxlint
+npm run preview  # предпросмотр собранной версии
+```
 
-Учебный проект
+## Деплой
+
+`.github/workflows/deploy.yml` собирает `main` и выкладывает `dist/` в GitHub
+Pages по пути `/mini-figma/` (путь задан в `base` в `vite.config.js`).
+
+## Структура
+
+```
+index.html            точка входа HTML
+src/main.jsx          монтирование React
+src/App.jsx           редактор: состояние, обработчики, разметка
+src/App.css           стили редактора
+src/index.css         токены и базовый сброс
+src/lib/shapes.js     геометрия, метрики текста, валидация, экспорт PNG
+designs/              дизайн-артефакты (не входят в сборку)
+AUDIT.md              результаты аудита проекта
+```
+
+## Замечания
+
+- Состояние живёт в памяти вкладки: перезагрузка возвращает исходный документ.
+- Совместная работа — «last write wins» для всего документа, без операционного
+  преобразования и разрешения конфликтов.
+- Google Fonts подключаются по требованию: при первом выборе шрифта.

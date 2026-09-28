@@ -1,8 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { exportToPng, normalizeShape } from './lib/shapes'
-
-const MIN_SIZE = 8
+import {
+  LINE_HEIGHT,
+  MIN_SIZE,
+  TYPE_LABELS,
+  exportToPng,
+  normalizeShape,
+  sanitizeShapes,
+  shapeRect,
+  textWidthApprox,
+  uid,
+  withTextMetrics,
+} from './lib/shapes'
 
 const TOOLS = [
   { id: 'select', label: 'Выделение', key: 'v' },
@@ -12,8 +21,6 @@ const TOOLS = [
   { id: 'text', label: 'Текст', key: 't' },
   { id: 'pan', label: 'Рука', key: 'h' },
 ]
-
-const TYPE_LABELS = { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', text: 'Текст' }
 
 const FONTS = [
   'Inter',
@@ -35,14 +42,16 @@ const FONTS = [
 
 const CURSOR_COLORS = ['#ec4899', '#0abab5', '#f59e0b', '#8b5cf6', '#22c55e', '#3b82f6']
 
-let seq = 0
-const uid = () => `s${Date.now().toString(36)}-${(seq++).toString(36)}`
+const NEW_SHAPE_FILL = '#ec4899'
+
+const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
+
 let clipboard = []
 const clientId = `c${Math.random().toString(36).slice(2, 8)}`
 const myName = `Гость-${Math.floor(Math.random() * 90) + 10}`
 const myColor = CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]
 
-const makeShape = (type, pt, fill = '#ec4899') => {
+const makeShape = (type, pt, fill = NEW_SHAPE_FILL) => {
   const s = {
     id: uid(),
     type,
@@ -59,58 +68,98 @@ const makeShape = (type, pt, fill = '#ec4899') => {
   if (type === 'text') {
     s.text = 'Текст'
     s.fontSize = 32
-    s.h = s.fontSize * 1.25
+    s.h = s.fontSize * LINE_HEIGHT
     s.font = 'Inter'
   }
   return s
 }
 
-const initialShapes = () => [
-  { id: uid(), type: 'frame', x: 60, y: 60, w: 420, h: 260, fill: '#ffffff', opacity: 1, visible: true, parentId: null, name: 'Фрейм 01' },
-  { id: uid(), type: 'rect', x: 100, y: 100, w: 160, h: 90, fill: '#ec4899', opacity: 1, visible: true, parentId: null, name: 'Плита' },
-  { id: uid(), type: 'ellipse', x: 300, y: 120, w: 120, h: 120, fill: '#0abab5', opacity: 1, visible: true, parentId: null, name: 'Круг' },
-  { id: uid(), type: 'text', x: 100, y: 380, w: 280, h: 45, fill: '#f3f4f6', opacity: 1, visible: true, text: 'mini-figma', fontSize: 36, font: 'Inter', parentId: null, name: 'Заголовок' },
-]
+const initialShapes = () => {
+  const frameId = uid()
+  return [
+    { id: frameId, type: 'frame', x: 60, y: 60, w: 420, h: 260, fill: '#ffffff', opacity: 1, visible: true, parentId: null, name: 'Фрейм 01' },
+    /* лежат внутри фрейма — значит должны быть его потомками, иначе
+       «на задний план» прячет их под непрозрачной заливкой фрейма */
+    { id: uid(), type: 'rect', x: 100, y: 100, w: 160, h: 90, fill: '#ec4899', opacity: 1, visible: true, parentId: frameId, name: 'Плита' },
+    { id: uid(), type: 'ellipse', x: 300, y: 120, w: 120, h: 120, fill: '#0abab5', opacity: 1, visible: true, parentId: frameId, name: 'Круг' },
+    { id: uid(), type: 'text', x: 100, y: 380, w: 280, h: 45, fill: '#f3f4f6', opacity: 1, visible: true, text: 'mini-figma', fontSize: 36, font: 'Inter', parentId: null, name: 'Заголовок' },
+  ]
+}
 
 /* ---------------- utils ---------------- */
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 
+/* ---------------- persistence ---------------- */
+
+const STORAGE_KEY = 'mini-figma:doc:v1'
+
+/* Достаёт сохранённый документ. Любой мусор в хранилище (другой формат,
+   битый JSON, подделанные значения) не должен ронять редактор: проверяем
+   тем же sanitizeShapes, что и сообщения соседних вкладок. */
+function loadStoredShapes() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const clean = sanitizeShapes(JSON.parse(raw))
+    return clean && clean.length ? clean : null
+  } catch {
+    return null
+  }
+}
+
+function storeShapes(list) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+  } catch {
+    /* приватный режим или переполнение квоты — молча продолжаем работать */
+  }
+}
+
+/* Контекст для разбора именованных цветов создаётся один раз:
+   safeHex дергается несколько раз за рендер. */
+let probeCtx = null
+
 function safeHex(color) {
-  if (typeof color !== 'string') return '#ec4899'
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim())
-  if (m) return color.trim().toLowerCase()
-  const probe = document.createElement('canvas').getContext('2d')
-  probe.fillStyle = color
-  const resolved = probe.fillStyle
-  const hex6 = /^#([0-9a-f]{6})$/i.exec(resolved)
-  if (hex6) return resolved.toLowerCase()
+  if (typeof color !== 'string') return NEW_SHAPE_FILL
+  const trimmed = color.trim()
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed)) return trimmed.toLowerCase()
+  if (!probeCtx) probeCtx = document.createElement('canvas').getContext('2d')
+  probeCtx.fillStyle = trimmed
+  const resolved = probeCtx.fillStyle
+  if (/^#([0-9a-f]{6})$/i.test(resolved)) return resolved.toLowerCase()
   const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(resolved)
   if (rgb) {
     return '#' + [rgb[1], rgb[2], rgb[3]].map((n) => Number(n).toString(16).padStart(2, '0')).join('')
   }
-  return '#ec4899'
-}
-
-function hexA(hex, a) {
-  return `${safeHex(hex)}${Math.round(clamp(a, 0, 1) * 255).toString(16).padStart(2, '0')}`
-}
-
-/* appximate width of a text shape for marquee-hit-test and export bounds */
-function textWidthApprox(s) {
-  const lines = String(s.text || '').split('\n')
-  const size = s.fontSize || 32
-  return Math.max(24, ...lines.map((l) => l.length * size * 0.55))
-}
-
-function shapeRect(s) {
-  const w = s.type === 'text' ? textWidthApprox(s) : s.w
-  const h = s.type === 'text' ? (s.fontSize || 32) * 1.25 * String(s.text || ' ').split('\n').length : s.h
-  return { x: s.x, y: s.y, w, h }
+  return NEW_SHAPE_FILL
 }
 
 function intersects(a, b) {
-  return a && b && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+  return Boolean(a) && Boolean(b) && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
+}
+
+/* Множество фигур, которые не видно на холсте: сами скрытые и всё, что
+   лежит внутри скрытого родителя. Фигуры рисуются плоским списком, а не
+   вложенно в фрейм, поэтому одного own-флага у потомка недостаточно. */
+function hiddenShapeIds(shapes) {
+  const childrenOf = new Map()
+  for (const s of shapes) {
+    if (!s.parentId) continue
+    if (!childrenOf.has(s.parentId)) childrenOf.set(s.parentId, [])
+    childrenOf.get(s.parentId).push(s.id)
+  }
+  const hidden = new Set()
+  const stack = []
+  for (const s of shapes) if (s.visible === false) stack.push(s.id)
+  /* обход в ширину по дереву: каждый id попадает в стек один раз */
+  while (stack.length) {
+    const id = stack.pop()
+    if (hidden.has(id)) continue
+    hidden.add(id)
+    for (const childId of childrenOf.get(id) || []) stack.push(childId)
+  }
+  return hidden
 }
 
 /* collect a set consisting of ids plus all their descendants */
@@ -129,6 +178,37 @@ function withDescendants(shapes, ids) {
   return out
 }
 
+/* Ставит каретку в конец содержимого contentEditable */
+function placeCaretEnd(el) {
+  const sel = window.getSelection()
+  if (!sel) return
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(false)
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+
+/* Ставит родителя раньше потомка, сохраняя относительный порядок остальных */
+function parentsFirst(list) {
+  const out = [...list]
+  for (let pass = 0; pass < out.length; pass++) {
+    let swapped = false
+    for (let i = 0; i < out.length; i++) {
+      const pid = out[i].parentId
+      if (!pid) continue
+      const pi = out.findIndex((s) => s.id === pid)
+      if (pi > i) {
+        const [p] = out.splice(pi, 1)
+        out.splice(i, 0, p)
+        swapped = true
+      }
+    }
+    if (!swapped) break
+  }
+  return out
+}
+
 /* inject a Google Font stylesheet once per family */
 const loadedFonts = new Set()
 function ensureFont(family) {
@@ -143,20 +223,27 @@ function ensureFont(family) {
 }
 
 export default function App() {
-  const [shapes, setShapes] = useState(initialShapes)
+  /* Сохранённый документ важнее исходного: без этого перезагрузка
+     возвращала редактор в демонстрационное состояние и работа терялась. */
+  const [shapes, setShapes] = useState(() => loadStoredShapes() || initialShapes())
   const [past, setPast] = useState([])
   const [future, setFuture] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
   const [tool, setTool] = useState('select')
-  const [fill, setFill] = useState('#ec4899')
+  /* цвет новых фигур: отдельного переключателя в UI нет, поэтому константа,
+     а не состояние с неиспользуемым сеттером */
+  const fill = NEW_SHAPE_FILL
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 60, y: 40 })
   const [draft, setDraft] = useState(null)
   const [marquee, setMarquee] = useState(null)
+  const [panning, setPanning] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editingNameId, setEditingNameId] = useState(null)
   const [showHelp, setShowHelp] = useState(false)
   const [ctxMenu, setCtxMenu] = useState(null)
+  /* Панель поверх холста на узких экранах */
+  const [sideOpen, setSideOpen] = useState(false)
   const [peers, setPeers] = useState({})
 
   const stageRef = useRef(null)
@@ -166,9 +253,32 @@ export default function App() {
   const lastCursorRef = useRef(0)
   const lastArrowRef = useRef(0)
   const chanRef = useRef(null)
-  const editingTextRef = useRef(null)
+  const shapesRef = useRef(shapes)
+  const dirtyRef = useRef(false)
+  const lastRemoteRef = useRef(null)
+  const textEditRef = useRef(null)
+  /* Значение, которое последний раз записали в поле правки. По нему решаем,
+     обновлять ли DOM: пользовательский набор с s.text расходится намеренно. */
+  const writtenTextRef = useRef(null)
+  /* Nonce нашего запроса документа. Пока он не погашен, берём ответ только
+     от одной вкладки: иначе новая вкладка применяла документы в порядке
+     доставки, и итог зависел от того, кто ответил быстрее. */
+  const helloNonceRef = useRef(uid())
+
+  useEffect(() => {
+    shapesRef.current = shapes
+  }, [shapes])
 
   const selected = shapes.find((s) => s.id === selectedIds[selectedIds.length - 1]) || null
+
+  const hiddenIds = useMemo(() => hiddenShapeIds(shapes), [shapes])
+
+  /* Пишем с дебаунсом: перетаскивание фигуры даёт десятки обновлений в
+     секунду, а в хранилище полезно складывать только устоявшееся. */
+  useEffect(() => {
+    const t = setTimeout(() => storeShapes(shapes), 400)
+    return () => clearTimeout(t)
+  }, [shapes])
 
   /* ---------------- collaboration (BroadcastChannel) ---------------- */
 
@@ -177,18 +287,58 @@ export default function App() {
     chanRef.current = chan
     chan.onmessage = (e) => {
       const msg = e.data
-      if (!msg || msg.clientId === clientId || !msg.type) return
+      if (!msg || typeof msg !== 'object' || msg.clientId === clientId || !msg.type) return
 
-      if (msg.type === 'shapes') setShapes(msg.shapes)
+      if (msg.type === 'shapes') {
+        const clean = sanitizeShapes(msg.shapes)
+        if (!clean) return
+        /* Ответ на наш запрос документа: берём первый и гасим nonce,
+           чтобы приход остальных ответов уже ничего не менял. */
+        if (typeof msg.to === 'string') {
+          if (msg.to !== helloNonceRef.current) return
+          helloNonceRef.current = null
+          /* Документ подменён целиком — история и выделение к прежнему
+             документу не относятся, откатывать их бессмысленно. */
+          setPast([])
+          setFuture([])
+          setSelectedIds([])
+        }
+        lastRemoteRef.current = clean
+        setShapes(clean)
+        return
+      }
+
+      if (msg.type === 'hello') {
+        /* новая вкладка просит актуальный документ — отдаём свой,
+           помечав ответ, чтобы запросивший взял именно его */
+        if (typeof msg.nonce !== 'string' || !msg.nonce) return
+        chan.postMessage({
+          type: 'shapes',
+          shapes: shapesRef.current,
+          clientId: clientId,
+          to: msg.nonce,
+        })
+        return
+      }
 
       if (msg.type === 'cursor') {
+        if (typeof msg.client !== 'string') return
+        if (!Number.isFinite(msg.x) || !Number.isFinite(msg.y)) return
         setPeers((p) => ({
           ...p,
-          [msg.client]: { x: msg.x, y: msg.y, name: msg.name, color: msg.color, ts: Date.now() },
+          [msg.client]: {
+            x: msg.x,
+            y: msg.y,
+            name: String(msg.name ?? '').slice(0, 24),
+            color: /^#[0-9a-f]{3,8}$/i.test(msg.color) ? msg.color : '#8b5cf6',
+            ts: Date.now(),
+          },
         }))
+        return
       }
 
       if (msg.type === 'bye') {
+        if (typeof msg.client !== 'string') return
         setPeers((p) => {
           const q = { ...p }
           delete q[msg.client]
@@ -196,6 +346,9 @@ export default function App() {
         })
       }
     }
+    /* спросим у уже открытых вкладок их документ, прежде чем брать дефолтный */
+    const nonce = helloNonceRef.current
+    chan.postMessage({ type: 'hello', clientId: clientId, nonce: nonce })
     const bye = () => chan.postMessage({ type: 'bye', client: clientId })
     window.addEventListener('beforeunload', bye)
     return () => {
@@ -206,10 +359,14 @@ export default function App() {
     }
   }, [])
 
-  /* broadcast our whole state (last-write-wins) */
+  /* Рассылаем документ только после локальной правки: иначе свежая вкладка
+     затирает работу тех, кто уже редактировал. Присланное обратно не
+     ретранслируем — иначе три вкладки зацикливают рассылку. */
   useEffect(() => {
+    if (shapes === lastRemoteRef.current) return
+    if (!dirtyRef.current) return
     const t = setTimeout(() => {
-      chanRef.current?.postMessage({ type: 'shapes', shapes, client: clientId })
+      chanRef.current?.postMessage({ type: 'shapes', shapes, clientId: clientId })
     }, 80)
     return () => clearTimeout(t)
   }, [shapes])
@@ -218,6 +375,37 @@ export default function App() {
   useEffect(() => {
     for (const s of shapes) if (s.type === 'text' && s.font) ensureFont(s.font)
   }, [shapes])
+
+  /* ---------------- text editing ---------------- */
+
+  /* Фигура, которую сейчас правят: та же самая ссылка, пока документ
+     не изменился. Благодаря этому эффект ниже не перезапускается на
+     каждой перерисовке холста. */
+  const editingShape = shapes.find((s) => s.id === editingId && s.type === 'text') || null
+
+  /* При открытии редактора поле пустое — считаем, что писать нужно заново. */
+  useEffect(() => {
+    writtenTextRef.current = null
+  }, [editingId])
+
+  /* Синхронизируем поле правки с текстом фигуры, но только когда s.text
+     действительно изменился (правка пришла из другой вкладки). Раньше здесь
+     стоял ref-колбэк, который пересоздавался на каждом рендере и возвращал
+     поле к последнему сохранённому тексту — набранный текст пропадал. */
+  useEffect(() => {
+    const el = textEditRef.current
+    if (!editingShape || !el) return
+    if (writtenTextRef.current !== editingShape.text) {
+      writtenTextRef.current = editingShape.text
+      if (el.textContent !== editingShape.text) el.textContent = editingShape.text
+    }
+    /* contentEditable не получает фокус сам — ставим его и каретку,
+       иначе печатать нельзя без лишнего клика */
+    if (document.activeElement !== el) {
+      el.focus()
+      placeCaretEnd(el)
+    }
+  }, [editingShape])
 
   /* drop stale peer cursors */
   useEffect(() => {
@@ -246,11 +434,18 @@ export default function App() {
 
   /* ---------------- history ---------------- */
 
+  /* Быстрые правки подряд (слайдер, серия нажатий) склеиваем в одну запись:
+     вместо выбрасывания снимка заменяем последний — иначе undo перескакивал
+     через промежуточные состояния. */
   const pushHistory = useCallback((snap) => {
+    /* любая локальная правка — документ теперь наш, можно рассылать */
+    dirtyRef.current = true
     const now = performance.now()
     if (now - lastPushRef.current > 400) {
       lastPushRef.current = now
       setPast((p) => [...p, snap].slice(-60))
+    } else if (snap !== shapesRef.current) {
+      setPast((p) => (p.length ? [...p.slice(0, -1), snap] : [snap]).slice(-60))
     }
     setFuture([])
   }, [])
@@ -258,6 +453,7 @@ export default function App() {
   const undo = useCallback(() => {
     if (!past.length) return
     const prev = past[past.length - 1]
+    dirtyRef.current = true
     setFuture((f) => [shapes, ...f].slice(0, 60))
     setPast(past.slice(0, -1))
     setShapes(prev)
@@ -267,6 +463,7 @@ export default function App() {
   const redo = useCallback(() => {
     if (!future.length) return
     const next = future[0]
+    dirtyRef.current = true
     setPast((p) => [...p, shapes].slice(-60))
     setFuture(future.slice(1))
     setShapes(next)
@@ -289,6 +486,7 @@ export default function App() {
     if (e.button === 1 || spaceRef.current || tool === 'pan') {
       e.preventDefault()
       modeRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, pan: { ...pan } }
+      setPanning(true)
       stageRef.current.setPointerCapture(e.pointerId)
       return
     }
@@ -299,11 +497,21 @@ export default function App() {
     if (handleEl && selectedIds.length === 1) {
       const s = selected
       if (s) {
+        /* У текста ширина не хранится, а получается из содержимого, поэтому
+           для масштаба кегля берём реально отрисованную ширину: оценка
+           textWidthApprox расходится с ней, и ресайз «уезжал». */
+        let textW = 0
+        if (s.type === 'text') {
+          const el = handleEl.closest('[data-shape]')
+          const r = el ? el.getBoundingClientRect() : null
+          if (r && r.width > 0) textW = r.width / zoom
+        }
         modeRef.current = {
           kind: 'resize',
           corner: handleEl.dataset.corner,
           orig: { ...s },
           snap: shapes,
+          textW,
           moved: false,
         }
         stageRef.current.setPointerCapture(e.pointerId)
@@ -330,13 +538,13 @@ export default function App() {
         }
         if (!selectedIds.includes(id)) setSelectedIds([id])
         const ids = selectedIds.includes(id) ? [...selectedIds] : [id]
+        /* withDescendants считаем один раз, а не на каждый элемент фильтра */
+        const group = withDescendants(shapes, ids)
         modeRef.current = {
           kind: 'move',
           ids,
           base: new Map(
-            shapes
-              .filter((k) => withDescendants(shapes, ids).has(k.id))
-              .map((k) => [k.id, { x: k.x, y: k.y }]),
+            shapes.filter((k) => group.has(k.id)).map((k) => [k.id, { x: k.x, y: k.y }]),
           ),
           snapshotOfShapes: shapes,
           origin: toWorld(e),
@@ -362,9 +570,12 @@ export default function App() {
     }
 
     if (tool === 'text') {
+      /* без preventDefault браузер после mousedown уводит фокус с поля правки
+         на холст, и текст тут же коммитится пустым */
+      e.preventDefault()
       const sh = makeShape('text', toWorld(e), fill)
       pushHistory(shapes)
-      setShapes([...shapes, sh])
+      setShapes((cur) => [...cur, sh])
       setSelectedIds([sh.id])
       setEditingId(sh.id)
       setTool('select')
@@ -392,7 +603,7 @@ export default function App() {
     if (m.kind === 'marquee') {
       const x = Math.min(m.origin.x, w.x)
       const y = Math.min(m.origin.y, w.y)
-      setMarquee({ x, y, w: Math.abs(w.x - m.origin.x), h: Math.abs(w.y - m.origin.y), raw: m })
+      setMarquee({ x, y, w: Math.abs(w.x - m.origin.x), h: Math.abs(w.y - m.origin.y) })
       return
     }
 
@@ -432,6 +643,17 @@ export default function App() {
         m.moved = true
         pushHistory(m.snap)
       }
+      if (o.type === 'text') {
+        /* У текста размер задаётся кеглем: тянем углы — меняем шрифт.
+           База — ширина, реально отрисованная в момент захвата (m.textW),
+           иначе каждый ресайз считал масштаб от завышенной оценки. */
+        const base = m.textW > 1 ? m.textW : textWidthApprox(o)
+        const fs = clamp(Math.round((o.fontSize || 32) * (nw / base)), 8, 200)
+        setShapes((cur) =>
+          cur.map((s) => (s.id === o.id ? withTextMetrics({ ...s, fontSize: fs }) : s)),
+        )
+        return
+      }
       setShapes((cur) => cur.map((s) => (s.id === o.id ? { ...s, x, y, w: nw, h: nh } : s)))
       return
     }
@@ -444,12 +666,13 @@ export default function App() {
   const onStagePointerUp = () => {
     const m = modeRef.current
     modeRef.current = null
+    setPanning(false)
 
     if (m && m.kind === 'marquee') {
       if (marquee && (marquee.w > 3 || marquee.h > 3)) {
         const rect = { x: marquee.x, y: marquee.y, w: marquee.w, h: marquee.h }
         const hit = shapes
-          .filter((s) => s.visible !== false)
+          .filter((s) => !hiddenIds.has(s.id))
           .map((s) => ({ s, r: shapeRect(s) }))
           .filter(({ r }) => intersects(r, rect))
           .map(({ s }) => s.id)
@@ -504,7 +727,7 @@ export default function App() {
             if (cx > fr.x && cx < fr.x + fr.w && cy > fr.y && cy < fr.y + fr.h) parent = f.id
           }
           const withParent = { ...sh, parentId: parent }
-          setShapes([...shapes, withParent])
+          setShapes((cur) => [...cur, withParent])
           setSelectedIds([sh.id])
         }
       }
@@ -513,7 +736,24 @@ export default function App() {
     }
   }
 
+  /* Указатель мог быть отнят системой (отмена жеста, потеря фокуса окна) —
+     иначе modeRef «залипает» и редактор остаётся в режиме перетаскивания. */
+  const onStagePointerLost = () => {
+    if (!modeRef.current) return
+    modeRef.current = null
+    setPanning(false)
+    setMarquee(null)
+    setDraft(null)
+  }
+
   /* ---------------- zoom / pan via wheel ---------------- */
+
+  /* Слушатель колеса подписан один раз: актуальные zoom/pan берём из ref,
+     иначе эффект переподписывался бы на каждом тике колеса. */
+  const viewRef = useRef({ zoom, pan })
+  useEffect(() => {
+    viewRef.current = { zoom, pan }
+  }, [zoom, pan])
 
   useEffect(() => {
     const el = stageRef.current
@@ -523,25 +763,29 @@ export default function App() {
       const r = el.getBoundingClientRect()
       const sx = e.clientX - r.left
       const sy = e.clientY - r.top
+      const { zoom: z0, pan: p0 } = viewRef.current
       if (e.ctrlKey || e.metaKey) {
-        const nz = clampZoom(zoom * Math.exp(-e.deltaY * 0.0015))
-        setPan({ x: sx - ((sx - pan.x) / zoom) * nz, y: sy - ((sy - pan.y) / zoom) * nz })
+        const nz = clampZoom(z0 * Math.exp(-e.deltaY * 0.0015))
+        viewRef.current = { zoom: nz, pan: { x: sx - ((sx - p0.x) / z0) * nz, y: sy - ((sy - p0.y) / z0) * nz } }
         setZoom(nz)
+        setPan(viewRef.current.pan)
       } else {
         const k = e.deltaMode === 1 ? 16 : 1
-        setPan({ x: pan.x - e.deltaX * k, y: pan.y - e.deltaY * k })
+        const next = { x: p0.x - e.deltaX * k, y: p0.y - e.deltaY * k }
+        viewRef.current = { zoom: z0, pan: next }
+        setPan(next)
       }
     }
     el.addEventListener('wheel', fn, { passive: false })
     return () => el.removeEventListener('wheel', fn)
-  }, [zoom, pan])
+  }, [])
 
   const zoomBy = (factor) => setZoom((z) => clampZoom(z * factor))
   const fitView = () => {
+    viewRef.current = { zoom: 1, pan: { x: 60, y: 40 } }
     setZoom(1)
     setPan({ x: 60, y: 40 })
   }
-  const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
 
   /* ---------------- shared actions (keyboard + context menu) ---------------- */
 
@@ -574,7 +818,7 @@ export default function App() {
     const originals = new Map(clipboard.map((s) => [idMap.get(s.id), s]))
     const clipSet = new Set(clipboard.map((s) => s.id))
     const rootOfClip = (s) => !(s.parentId && clipSet.has(s.parentId))
-    setShapes([...shapes, ...clones])
+    setShapes((cur) => [...cur, ...clones])
     setSelectedIds(clones.filter((c) => rootOfClip(originals.get(c.id))).map((c) => c.id))
   }
 
@@ -592,9 +836,11 @@ export default function App() {
         y: s.y + 24,
         parentId: idMap.has(s.parentId) ? idMap.get(s.parentId) : s.parentId,
       }))
-    /* select clones of top-level selection */
-    const rootDups = clones.filter((c) => rootIds.includes(c.id)).map((c) => c.id)
-    setShapes([...shapes, ...clones])
+    /* Выделяем копии корней выделения. rootIds содержит исходные id, а у
+       клонов id новые — раньше сравнение всегда давало пустой результат,
+       и выделялось всё поддерево вместе с потомками. */
+    const rootDups = rootIds.map((oldId) => idMap.get(oldId)).filter(Boolean)
+    setShapes((cur) => [...cur, ...clones])
     setSelectedIds(rootDups.length ? rootDups : clones.map((c) => c.id))
   }
 
@@ -606,18 +852,20 @@ export default function App() {
   const selectAll = () => {
     setSelectedIds(
       shapes
-        .filter((s) => s.visible !== false && !(s.parentId && shapes.some((k) => k.id === s.parentId)))
+        .filter((s) => !hiddenIds.has(s.id) && !(s.parentId && shapes.some((k) => k.id === s.parentId)))
         .map((s) => s.id),
     )
   }
 
+  /* Порядок в массиве = порядок отрисовки. Потомка нельзя ставить раньше
+     родителя, иначе непрозрачный фрейм накроет его и фигура «исчезнет». */
   const reorderSel = (front) => {
     if (!selectedIds.length) return
     pushHistory(shapes)
     const set = withDescendants(shapes, selectedIds)
     const moved = shapes.filter((s) => set.has(s.id))
     const rest = shapes.filter((s) => !set.has(s.id))
-    setShapes(front ? [...rest, ...moved] : [...moved, ...rest])
+    setShapes(parentsFirst(front ? [...rest, ...moved] : [...moved, ...rest]))
   }
 
   const nudge = (dx, dy) => {
@@ -693,18 +941,34 @@ export default function App() {
       setSelectedIds([el.dataset.shape])
       if (tool !== 'select') setTool('select')
     }
+    /* держим меню в пределах окна с обеих сторон */
     const bw = 236
+    const bh = 330
     setCtxMenu({
-      x: Math.min(e.clientX, window.innerWidth - bw - 8),
-      y: Math.min(e.clientY, window.innerHeight - 330),
+      x: clamp(e.clientX, 8, Math.max(8, window.innerWidth - bw - 8)),
+      y: clamp(e.clientY, 8, Math.max(8, window.innerHeight - bh - 8)),
       onShape: !!(el && shapes.find((k) => k.id === el.dataset.shape)),
     })
   }
 
   /* ---------------- keyboard ---------------- */
 
+  /* Обработчики клавиатуры читают актуальное состояние через kbRef и
+     подписаны один раз: так список не пересоздаётся на каждом рендере
+     (иначе событие может пропасть между remove/add во время drag'а). */
+  const kbRef = useRef(null)
+  useEffect(() => {
+    kbRef.current = {
+      undo, redo, zoomBy, fitView, selectAll, copySel, cutSel,
+      pasteClip, duplicateSel, deleteSel, nudge, reorderSel,
+      shapes, selectedIds, editingId,
+    }
+  })
+
   useEffect(() => {
     const onDown = (e) => {
+      const k = kbRef.current
+      if (!k) return
       if (e.key === 'Escape') {
         const ce = document.activeElement
         if (ce && ce.isContentEditable) {
@@ -714,11 +978,14 @@ export default function App() {
         setShowHelp(false)
         setCtxMenu(null)
         setEditingId(null)
+        setSideOpen(false)
         setSelectedIds([])
         setTool('select')
         return
       }
-      if (e.target.closest('input, textarea, [contenteditable="true"]')) {
+      /* e.target — не всегда элемент (окно/документ): closest есть не у всех */
+      const target = e.target instanceof Element ? e.target : null
+      if (target && target.closest('input, textarea, [contenteditable="true"]')) {
         if (e.key === 'Enter' && e.target.isContentEditable) e.target.blur()
         return
       }
@@ -732,54 +999,54 @@ export default function App() {
 
       if (mod && letter === 'z') {
         e.preventDefault()
-        if (e.shiftKey) redo()
-        else undo()
+        if (e.shiftKey) k.redo()
+        else k.undo()
       } else if (mod && letter === 'y') {
         e.preventDefault()
-        redo()
+        k.redo()
       } else if (mod && code === 'Digit0') {
         e.preventDefault()
-        fitView()
+        k.fitView()
       } else if (mod && letter === 'a') {
         e.preventDefault()
-        if (!editingId) selectAll()
+        if (!k.editingId) k.selectAll()
       } else if (mod && letter === 'd') {
         e.preventDefault()
-        duplicateSel()
-      } else if ((code === 'Delete' || code === 'Backspace') && selectedIds.length && !editingId) {
+        k.duplicateSel()
+      } else if ((code === 'Delete' || code === 'Backspace') && k.selectedIds.length && !k.editingId) {
         e.preventDefault()
-        deleteSel()
+        k.deleteSel()
       } else if (mod && (letter === 'c' || letter === 'x')) {
         e.preventDefault()
-        if (letter === 'x') cutSel()
-        else copySel()
+        if (letter === 'x') k.cutSel()
+        else k.copySel()
       } else if (mod && letter === 'v') {
         e.preventDefault()
-        pasteClip()
+        k.pasteClip()
       } else if (e.key === '?' || (e.shiftKey && code === 'Slash')) {
         e.preventDefault()
         setShowHelp((v) => !v)
-      } else if (e.key === 'Enter' && selectedIds.length === 1 && !editingId) {
-        const s = shapes.find((k) => k.id === selectedIds[0])
+      } else if (e.key === 'Enter' && k.selectedIds.length === 1 && !k.editingId) {
+        const s = k.shapes.find((x) => x.id === k.selectedIds[0])
         if (s && s.type === 'text') setEditingId(s.id)
         else if (s) setEditingNameId(s.id)
-      } else if (selectedIds.length && code.startsWith('Arrow')) {
+      } else if (k.selectedIds.length && code.startsWith('Arrow')) {
         e.preventDefault()
         const step = e.shiftKey ? 10 : 1
         const dx = code === 'ArrowLeft' ? -step : code === 'ArrowRight' ? step : 0
         const dy = code === 'ArrowUp' ? -step : code === 'ArrowDown' ? step : 0
-        nudge(dx, dy)
-      } else if (code === 'BracketRight' && selectedIds.length) {
-        reorderSel(true)
-      } else if (code === 'BracketLeft' && selectedIds.length) {
-        reorderSel(false)
-      } else if (code === 'F2' && selectedIds.length === 1) {
+        k.nudge(dx, dy)
+      } else if (code === 'BracketRight' && k.selectedIds.length) {
+        k.reorderSel(true)
+      } else if (code === 'BracketLeft' && k.selectedIds.length) {
+        k.reorderSel(false)
+      } else if (code === 'F2' && k.selectedIds.length === 1) {
         e.preventDefault()
-        setEditingNameId(selectedIds[0])
+        setEditingNameId(k.selectedIds[0])
       } else if (code === 'Equal' || code === 'NumpadAdd') {
-        zoomBy(1.25)
+        k.zoomBy(1.25)
       } else if (code === 'Minus' || code === 'NumpadSubtract') {
-        zoomBy(1 / 1.25)
+        k.zoomBy(1 / 1.25)
       } else if (!mod && letter) {
         const t = TOOLS.find((k) => k.key === letter)
         if (t) setTool(t.id)
@@ -794,63 +1061,71 @@ export default function App() {
       window.removeEventListener('keydown', onDown)
       window.removeEventListener('keyup', onUp)
     }
-  })
+  }, [])
 
   /* ---------------- shape ops ---------------- */
 
+  /* Функциональная форма setShapes: правки из соседних обработчиков
+     в одном тике React не должны затирать друг друга. */
   const updateSelected = (patch) => {
     if (!selected) return
+    const id = selected.id
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === selected.id ? { ...s, ...patch } : s)))
+    /* смена кегля меняет и габариты текста — пересчитываем их вместе */
+    setShapes((cur) => cur.map((s) => (s.id === id ? withTextMetrics({ ...s, ...patch }) : s)))
   }
 
   const updateMany = (patch) => {
     if (!selectedIds.length) return
+    const ids = new Set(selectedIds)
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (selectedIds.includes(s.id) ? { ...s, ...patch } : s)))
+    setShapes((cur) => cur.map((s) => (ids.has(s.id) ? { ...s, ...patch } : s)))
   }
 
   const toggleVisible = (id) => {
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === id ? { ...s, visible: s.visible === false } : s)))
+    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, visible: s.visible === false } : s)))
   }
 
   const renameShape = (id, name) => {
     pushHistory(shapes)
-    setShapes(shapes.map((s) => (s.id === id ? { ...s, name } : s)))
+    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, name } : s)))
   }
 
   const deleteMany = (ids) => {
     const kill = withDescendants(shapes, ids)
     pushHistory(shapes)
-    setShapes(shapes.filter((s) => !kill.has(s.id)))
+    setShapes((cur) => cur.filter((s) => !kill.has(s.id)))
     setSelectedIds([])
   }
 
   const commitTextEdit = (id, newText) => {
-    const s = shapes.find((k) => k.id === id)
     setEditingId(null)
+    const s = shapes.find((k) => k.id === id)
     if (!s || (s.text || '') === (newText || '')) return
     pushHistory(shapes)
-    const lines = Math.max(1, String(newText).split('\n').length)
-    setShapes(
-      shapes.map((k) =>
-        k.id === id
-          ? { ...k, text: newText, h: (k.fontSize || 32) * 1.25 * lines, w: Math.max(k.w, textWidthApprox({ ...k, text: newText })) }
-          : k,
-      ),
+    /* функциональная форма: не затираем правки, случившиеся в этом же тике */
+    setShapes((cur) =>
+      cur.map((k) => (k.id === id ? withTextMetrics({ ...k, text: newText }) : k)),
     )
-    editingTextRef.current = null
   }
 
   /* ---------------- render ---------------- */
 
   return (
-    <div className="editor">
+    <div className={`editor${sideOpen ? ' side-open' : ''}`}>
       <header className="topbar">
         <span className="top-title">
           <span className="logo-dot" /> mini-figma
         </span>
+        <button
+          className="top-btn side-toggle"
+          onClick={() => setSideOpen((v) => !v)}
+          title="Свойства и слои"
+          aria-expanded={sideOpen}
+        >
+          ☰
+        </button>
         <button className="top-btn" onClick={undo} disabled={!past.length} title="Отменить (Ctrl+Z)">
           ↶
         </button>
@@ -898,26 +1173,29 @@ export default function App() {
 
       <main
         ref={stageRef}
-        className={`canvas tool-${tool}${modeRef.current?.kind === 'pan' ? ' panning' : ''}`}
-        onPointerDown={onStagePointerDown}
+        className={`canvas tool-${tool}${panning ? ' panning' : ''}`}
+        /* тап по холсту убирает выезжающую панель — на узком экране иначе
+           она закрывала бы половину холста */
+        onPointerDown={(e) => {
+          setSideOpen(false)
+          onStagePointerDown(e)
+        }}
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
+        onPointerCancel={onStagePointerLost}
+        onLostPointerCapture={onStagePointerLost}
         onMouseDown={(e) => e.button === 1 && e.preventDefault()}
         onContextMenu={openContextMenu}
         onDoubleClick={(e) => {
           const el = e.target.closest('[data-shape]')
           if (el) {
             const s = shapes.find((k) => k.id === el.dataset.shape)
-            if (s && s.type === 'text') {
-              editingTextRef.current = shapes
-              setEditingId(s.id)
-            }
+            if (s && s.type === 'text') setEditingId(s.id)
             return
           }
-          editingTextRef.current = shapes
           const sh = makeShape('text', toWorld(e), fill)
           pushHistory(shapes)
-          setShapes([...shapes, sh])
+          setShapes((cur) => [...cur, sh])
           setSelectedIds([sh.id])
           setEditingId(sh.id)
         }}
@@ -927,7 +1205,7 @@ export default function App() {
           style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
         >
           {shapes.map((s) =>
-            s.visible === false ? null : (
+            hiddenIds.has(s.id) ? null : (
               <div
                 key={s.id}
                 data-shape={s.id}
@@ -942,10 +1220,12 @@ export default function App() {
                         left: s.x,
                         top: s.y,
                         opacity: s.opacity,
+                        /* задаём всегда, включая system-ui: иначе шрифт
+                           текста зависел бы от того, указан ли он явно */
                         fontFamily:
                           s.font && s.font !== 'system-ui'
                             ? `"${s.font}", system-ui, sans-serif`
-                            : undefined,
+                            : 'system-ui, "Segoe UI", sans-serif',
                       }
                     : {
                         left: s.x,
@@ -972,9 +1252,8 @@ export default function App() {
                     <div
                       className="text-edit"
                       contentEditable
-                      ref={(el) => {
-                        if (el && el.textContent !== (s.text || '')) el.textContent = s.text || ''
-                      }}
+                      ref={textEditRef}
+                      style={{ color: s.fill, fontSize: s.fontSize }}
                       onBlur={(e) => commitTextEdit(s.id, e.target.textContent)}
                       onKeyDown={(e) => {
                         e.stopPropagation()
@@ -995,6 +1274,7 @@ export default function App() {
                     {['nw', 'ne', 'sw', 'se'].map((corner) => (
                       <div
                         key={corner}
+                        data-handle=""
                         data-corner={corner}
                         className="handle"
                         style={{
@@ -1078,7 +1358,9 @@ export default function App() {
                 />
                 <span className="dim mono">{Math.round(selected.opacity * 100)}%</span>
               </div>
-              {selected.type === 'text' && (
+              {/* шрифт и кегль — только при одиночном выборе: иначе правили бы
+                  только последний объект, в отличие от заливки и прозрачности */}
+              {selected.type === 'text' && selectedIds.length === 1 && (
                 <>
                   <div className="prop-row">
                     <label className="prop-label" htmlFor="font-input">Шрифт</label>
@@ -1108,7 +1390,10 @@ export default function App() {
                       min="8"
                       max="200"
                       value={selected.fontSize}
-                      onChange={(e) => updateSelected({ fontSize: clamp(Number(e.target.value) || 32, 8, 200) })}
+                      onChange={(e) => {
+                      const size = clamp(Number(e.target.value) || 32, 8, 200)
+                      updateSelected({ fontSize: size })
+                    }}
                     />
                   </div>
                 </>
@@ -1216,10 +1501,10 @@ export default function App() {
 
       {showHelp && (
         <div className="help-overlay" onClick={() => setShowHelp(false)}>
-          <div className="help-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="help-modal" role="dialog" aria-modal="true" aria-label="Горячие клавиши" onClick={(e) => e.stopPropagation()}>
             <header>
               <h2>Горячие клавиши</h2>
-              <button className="icon-btn" onClick={() => setShowHelp(false)}>✕</button>
+              <button className="icon-btn" aria-label="Закрыть" onClick={() => setShowHelp(false)}>✕</button>
             </header>
             <div className="help-cols">
               <div>
@@ -1278,7 +1563,7 @@ export default function App() {
               setCtxMenu(null)
             }}
           />
-          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          <div className="ctx-menu" role="menu" aria-label="Контекстное меню" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
             {ctxMenu.onShape ? (
               <>
                 {selected?.type === 'text' && !editingId && (
@@ -1329,8 +1614,12 @@ function layerTree(shapes) {
     byParent.get(p).push(s)
   }
   const rows = []
+  const seen = new Set()
   const walk = (parent, depth) => {
     for (const s of [...(byParent.get(parent) || [])].reverse()) {
+      /* данные приходят из сети: защищаемся от зацикливания parentId */
+      if (seen.has(s.id)) continue
+      seen.add(s.id)
       rows.push({ s, depth })
       if (byParent.has(s.id)) walk(s.id, depth + 1)
     }

@@ -16,17 +16,41 @@
   overflow: hidden;
 }
 
+/* поля ввода и текст на холсте должны оставаться выделяемыми мышью */
+.editor input,
+.editor textarea,
+.editor .text-edit,
+.editor .rename-input {
+  user-select: text;
+}
+
+/* фокус с клавиатуры должен быть виден (доступность) */
+.editor :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ---------- top bar ---------- */
 
+/* Панель инструментов не переносится: на узких экранах её можно было бы
+   обрезать по .editor { overflow: hidden }, и кнопка экспорта становилась
+   недоступной. Поэтому шапка прокручивается по горизонтали, а не режется. */
 .topbar {
   grid-area: top;
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 0 12px;
   background: #2c2c2c;
   border-bottom: 1px solid #383838;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar::-webkit-scrollbar {
+  display: none;
+}
+.topbar > * {
+  flex: none;
 }
 
 .top-title {
@@ -88,7 +112,8 @@
 }
 
 .top-spacer {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 8px;
 }
 
 /* ---------- tool rail ---------- */
@@ -170,25 +195,33 @@
   opacity: 0.45;
   pointer-events: none;
 }
-.shape-body {
-  width: 100%;
-  height: 100%;
-}
 
+/* Шрифт НЕ задаём здесь: он приходит инлайном на .shape.text, и собственное
+   значение потомка всегда выигрывало бы у унаследованного — выбор шрифта
+   в панели не влиял на холст. Здесь только метрики строки. */
 .shape-text {
   line-height: 1.25;
   white-space: pre-wrap;
-  font-family: system-ui, 'Segoe UI', sans-serif;
   cursor: default;
 }
 
+/* .world — абсолютный слой без размеров, поэтому текстовая фигура
+   без явной ширины сжимается до самого длинного слова и переносится */
+.shape.text {
+  width: max-content;
+  max-width: none;
+}
+
+/* Поле правки повторяет вид фигуры: тот же кегль, цвет заливки и
+   межстрочный интервал. Раньше кегль и цвет были зашиты в CSS, поэтому
+   при входе в правку текст скакал с 32px на 13px и терял свой цвет. */
 .text-edit {
   min-width: 24px;
   outline: 1.5px dashed var(--accent);
   outline-offset: 3px;
   cursor: text;
   white-space: pre-wrap;
-  color: #fafafa;
+  line-height: 1.25;
 }
 
 .handle {
@@ -251,7 +284,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-input[type='color'] {
+/* цвет берём из токена, а не из литерала — иначе смена акцента разъезжается */
+.sidebar input[type='color'] {
   width: 34px;
   height: 24px;
   padding: 0;
@@ -260,7 +294,7 @@ input[type='color'] {
   background: none;
   cursor: pointer;
 }
-input[type='range'] {
+.sidebar input[type='range'] {
   flex: 1;
   accent-color: var(--accent);
   cursor: pointer;
@@ -314,7 +348,7 @@ input[type='range'] {
   background: #383838;
 }
 .layer.active {
-  background: rgba(236, 72, 153, 0.16);
+  background: var(--accent-soft);
 }
 .layer.active .layer-name {
   color: #ffb3d9;
@@ -352,7 +386,7 @@ input[type='range'] {
   color: #e8e8e8;
 }
 .icon-btn.danger:hover {
-  background: rgba(236, 72, 153, 0.25);
+  background: var(--accent-strong);
   color: #ffc4e2;
 }
 
@@ -387,7 +421,7 @@ input[type='range'] {
 .marquee {
   position: absolute;
   border: 1px dashed var(--accent);
-  background: rgba(236, 72, 153, 0.08);
+  background: var(--accent-faint);
   pointer-events: none;
 }
 
@@ -508,9 +542,6 @@ input[type='range'] {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #8a8a8a;
-}
-.help-modal header h2 + .help-cols h4 {
-  margin-top: 4px;
 }
 .help-row {
   display: flex;
@@ -644,11 +675,14 @@ input[type='range'] {
 
 /* -------- scrollbars (webkit) -------- */
 
-.sidebar ::-webkit-scrollbar,
+.sidebar,
+.layers-list {
+  scrollbar-width: thin;
+  scrollbar-color: #484848 transparent;
+}
 .layers-list::-webkit-scrollbar {
   width: 8px;
 }
-.sidebar ::-webkit-scrollbar-thumb,
 .layers-list::-webkit-scrollbar-thumb {
   background: #484848;
   border-radius: 4px;
@@ -661,6 +695,9 @@ input[type='range'] {
     grid-template-columns: 44px 1fr 210px;
   }
 }
+/* На узких экранах панель не исчезает, а наезжает поверх холста: раньше
+   она просто скрывалась, и на телефоне нельзя было ни выбрать фигуру,
+   ни поменять заливку, ни удалить её. */
 @media (max-width: 700px) {
   .editor {
     grid-template-columns: 44px 1fr;
@@ -669,6 +706,25 @@ input[type='range'] {
       'rail stage';
   }
   .sidebar {
-    display: none;
+    position: absolute;
+    top: 48px;
+    right: 0;
+    bottom: 0;
+    width: min(300px, 82vw);
+    z-index: 40;
+    transform: translateX(100%);
+    transition: transform 0.18s ease;
+    box-shadow: -10px 0 24px rgba(0, 0, 0, 0.4);
   }
+  .editor.side-open .sidebar {
+    transform: none;
+  }
+  .side-toggle {
+    display: inline-flex;
+  }
+}
+
+/* Кнопка показа панели нужна только в этой раскладке. */
+.side-toggle {
+  display: none;
 }
