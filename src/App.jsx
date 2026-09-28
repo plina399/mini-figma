@@ -61,12 +61,17 @@ const makeShape = (type, pt, fill = '#ec4899') => {
   return s
 }
 
-const initialShapes = () => [
-  { id: uid(), type: 'frame', x: 60, y: 60, w: 420, h: 260, fill: '#ffffff', opacity: 1, visible: true, parentId: null, name: 'Фрейм 01' },
-  { id: uid(), type: 'rect', x: 100, y: 100, w: 160, h: 90, fill: '#ec4899', opacity: 1, visible: true, parentId: null, name: 'Плита' },
-  { id: uid(), type: 'ellipse', x: 300, y: 120, w: 120, h: 120, fill: '#0abab5', opacity: 1, visible: true, parentId: null, name: 'Круг' },
-  { id: uid(), type: 'text', x: 100, y: 380, w: 280, h: 45, fill: '#f3f4f6', opacity: 1, visible: true, text: 'mini-figma', fontSize: 36, font: 'Inter', parentId: null, name: 'Заголовок' },
-]
+const initialShapes = () => {
+  const frameId = uid()
+  return [
+    { id: frameId, type: 'frame', x: 60, y: 60, w: 420, h: 260, fill: '#ffffff', opacity: 1, visible: true, parentId: null, name: 'Фрейм 01' },
+    /* лежат внутри фрейма — значит должны быть его потомками, иначе
+       «на задний план» прячет их под непрозрачной заливкой фрейма */
+    { id: uid(), type: 'rect', x: 100, y: 100, w: 160, h: 90, fill: '#ec4899', opacity: 1, visible: true, parentId: frameId, name: 'Плита' },
+    { id: uid(), type: 'ellipse', x: 300, y: 120, w: 120, h: 120, fill: '#0abab5', opacity: 1, visible: true, parentId: frameId, name: 'Круг' },
+    { id: uid(), type: 'text', x: 100, y: 380, w: 280, h: 45, fill: '#f3f4f6', opacity: 1, visible: true, text: 'mini-figma', fontSize: 36, font: 'Inter', parentId: null, name: 'Заголовок' },
+  ]
+}
 
 /* ---------------- utils ---------------- */
 
@@ -121,6 +126,37 @@ function withDescendants(shapes, ids) {
         changed = true
       }
     }
+  }
+  return out
+}
+
+/* Ставит каретку в конец содержимого contentEditable */
+function placeCaretEnd(el) {
+  const sel = window.getSelection()
+  if (!sel) return
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(false)
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+
+/* Ставит родителя раньше потомка, сохраняя относительный порядок остальных */
+function parentsFirst(list) {
+  const out = [...list]
+  for (let pass = 0; pass < out.length; pass++) {
+    let swapped = false
+    for (let i = 0; i < out.length; i++) {
+      const pid = out[i].parentId
+      if (!pid) continue
+      const pi = out.findIndex((s) => s.id === pid)
+      if (pi > i) {
+        const [p] = out.splice(pi, 1)
+        out.splice(i, 0, p)
+        swapped = true
+      }
+    }
+    if (!swapped) break
   }
   return out
 }
@@ -277,6 +313,9 @@ export default function App() {
 
   /* ---------------- history ---------------- */
 
+  /* Быстрые правки подряд (слайдер, серия нажатий) склеиваем в одну запись:
+     вместо выбрасывания снимка заменяем последний — иначе undo перескакивал
+     через промежуточные состояния. */
   const pushHistory = useCallback((snap) => {
     /* любая локальная правка — документ теперь наш, можно рассылать */
     dirtyRef.current = true
@@ -284,6 +323,8 @@ export default function App() {
     if (now - lastPushRef.current > 400) {
       lastPushRef.current = now
       setPast((p) => [...p, snap].slice(-60))
+    } else if (snap !== shapesRef.current) {
+      setPast((p) => (p.length ? [...p.slice(0, -1), snap] : [snap]).slice(-60))
     }
     setFuture([])
   }, [])
@@ -365,13 +406,13 @@ export default function App() {
         }
         if (!selectedIds.includes(id)) setSelectedIds([id])
         const ids = selectedIds.includes(id) ? [...selectedIds] : [id]
+        /* withDescendants считаем один раз, а не на каждый элемент фильтра */
+        const group = withDescendants(shapes, ids)
         modeRef.current = {
           kind: 'move',
           ids,
           base: new Map(
-            shapes
-              .filter((k) => withDescendants(shapes, ids).has(k.id))
-              .map((k) => [k.id, { x: k.x, y: k.y }]),
+            shapes.filter((k) => group.has(k.id)).map((k) => [k.id, { x: k.x, y: k.y }]),
           ),
           snapshotOfShapes: shapes,
           origin: toWorld(e),
@@ -397,6 +438,9 @@ export default function App() {
     }
 
     if (tool === 'text') {
+      /* без preventDefault браузер после mousedown уводит фокус с поля правки
+         на холст, и текст тут же коммитится пустым */
+      e.preventDefault()
       const sh = makeShape('text', toWorld(e), fill)
       pushHistory(shapes)
       setShapes([...shapes, sh])
@@ -466,6 +510,12 @@ export default function App() {
       if (!m.moved) {
         m.moved = true
         pushHistory(m.snap)
+      }
+      if (o.type === 'text') {
+        /* у текста размер задаётся кеглем: тянем углы — меняем шрифт */
+        const fs = clamp(Math.round((o.fontSize || 32) * (nw / Math.max(1, o.w))), 8, 200)
+        setShapes((cur) => cur.map((s) => (s.id === o.id ? { ...s, fontSize: fs } : s)))
+        return
       }
       setShapes((cur) => cur.map((s) => (s.id === o.id ? { ...s, x, y, w: nw, h: nh } : s)))
       return
@@ -546,6 +596,15 @@ export default function App() {
       setDraft(null)
       setTool('select')
     }
+  }
+
+  /* Указатель мог быть отнят системой (отмена жеста, потеря фокуса окна) —
+     иначе modeRef «залипает» и редактор остаётся в режиме перетаскивания. */
+  const onStagePointerLost = () => {
+    if (!modeRef.current) return
+    modeRef.current = null
+    setMarquee(null)
+    setDraft(null)
   }
 
   /* ---------------- zoom / pan via wheel ---------------- */
@@ -657,13 +716,15 @@ export default function App() {
     )
   }
 
+  /* Порядок в массиве = порядок отрисовки. Потомка нельзя ставить раньше
+     родителя, иначе непрозрачный фрейм накроет его и фигура «исчезнет». */
   const reorderSel = (front) => {
     if (!selectedIds.length) return
     pushHistory(shapes)
     const set = withDescendants(shapes, selectedIds)
     const moved = shapes.filter((s) => set.has(s.id))
     const rest = shapes.filter((s) => !set.has(s.id))
-    setShapes(front ? [...rest, ...moved] : [...moved, ...rest])
+    setShapes(parentsFirst(front ? [...rest, ...moved] : [...moved, ...rest]))
   }
 
   const nudge = (dx, dy) => {
@@ -964,6 +1025,8 @@ export default function App() {
         onPointerDown={onStagePointerDown}
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
+        onPointerCancel={onStagePointerLost}
+        onLostPointerCapture={onStagePointerLost}
         onMouseDown={(e) => e.button === 1 && e.preventDefault()}
         onContextMenu={openContextMenu}
         onDoubleClick={(e) => {
@@ -1035,7 +1098,14 @@ export default function App() {
                       className="text-edit"
                       contentEditable
                       ref={(el) => {
-                        if (el && el.textContent !== (s.text || '')) el.textContent = s.text || ''
+                        if (!el) return
+                        if (el.textContent !== (s.text || '')) el.textContent = s.text || ''
+                        /* contentEditable не получает фокус сам — ставим его и каретку,
+                           иначе печатать нельзя без лишнего клика */
+                        if (document.activeElement !== el) {
+                          el.focus()
+                          placeCaretEnd(el)
+                        }
                       }}
                       onBlur={(e) => commitTextEdit(s.id, e.target.textContent)}
                       onKeyDown={(e) => {
@@ -1392,8 +1462,12 @@ function layerTree(shapes) {
     byParent.get(p).push(s)
   }
   const rows = []
+  const seen = new Set()
   const walk = (parent, depth) => {
     for (const s of [...(byParent.get(parent) || [])].reverse()) {
+      /* данные приходят из сети: защищаемся от зацикливания parentId */
+      if (seen.has(s.id)) continue
+      seen.add(s.id)
       rows.push({ s, depth })
       if (byParent.has(s.id)) walk(s.id, depth + 1)
     }
