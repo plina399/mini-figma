@@ -242,6 +242,8 @@ export default function App() {
   const [editingNameId, setEditingNameId] = useState(null)
   const [showHelp, setShowHelp] = useState(false)
   const [ctxMenu, setCtxMenu] = useState(null)
+  /* Панель поверх холста на узких экранах */
+  const [sideOpen, setSideOpen] = useState(false)
   const [peers, setPeers] = useState({})
 
   const stageRef = useRef(null)
@@ -976,6 +978,7 @@ export default function App() {
         setShowHelp(false)
         setCtxMenu(null)
         setEditingId(null)
+        setSideOpen(false)
         setSelectedIds([])
         setTool('select')
         return
@@ -1110,11 +1113,19 @@ export default function App() {
   /* ---------------- render ---------------- */
 
   return (
-    <div className="editor">
+    <div className={`editor${sideOpen ? ' side-open' : ''}`}>
       <header className="topbar">
         <span className="top-title">
           <span className="logo-dot" /> mini-figma
         </span>
+        <button
+          className="top-btn side-toggle"
+          onClick={() => setSideOpen((v) => !v)}
+          title="Свойства и слои"
+          aria-expanded={sideOpen}
+        >
+          ☰
+        </button>
         <button className="top-btn" onClick={undo} disabled={!past.length} title="Отменить (Ctrl+Z)">
           ↶
         </button>
@@ -1163,7 +1174,12 @@ export default function App() {
       <main
         ref={stageRef}
         className={`canvas tool-${tool}${panning ? ' panning' : ''}`}
-        onPointerDown={onStagePointerDown}
+        /* тап по холсту убирает выезжающую панель — на узком экране иначе
+           она закрывала бы половину холста */
+        onPointerDown={(e) => {
+          setSideOpen(false)
+          onStagePointerDown(e)
+        }}
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
         onPointerCancel={onStagePointerLost}

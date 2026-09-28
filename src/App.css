@@ -32,6 +32,9 @@
 
 /* ---------- top bar ---------- */
 
+/* Панель инструментов не переносится: на узких экранах её можно было бы
+   обрезать по .editor { overflow: hidden }, и кнопка экспорта становилась
+   недоступной. Поэтому шапка прокручивается по горизонтали, а не режется. */
 .topbar {
   grid-area: top;
   display: flex;
@@ -40,6 +43,14 @@
   padding: 0 12px;
   background: #2c2c2c;
   border-bottom: 1px solid #383838;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.topbar::-webkit-scrollbar {
+  display: none;
+}
+.topbar > * {
+  flex: none;
 }
 
 .top-title {
@@ -101,7 +112,8 @@
 }
 
 .top-spacer {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 8px;
 }
 
 /* ---------- tool rail ---------- */
@@ -683,6 +695,9 @@
     grid-template-columns: 44px 1fr 210px;
   }
 }
+/* На узких экранах панель не исчезает, а наезжает поверх холста: раньше
+   она просто скрывалась, и на телефоне нельзя было ни выбрать фигуру,
+   ни поменять заливку, ни удалить её. */
 @media (max-width: 700px) {
   .editor {
     grid-template-columns: 44px 1fr;
@@ -691,6 +706,25 @@
       'rail stage';
   }
   .sidebar {
-    display: none;
+    position: absolute;
+    top: 48px;
+    right: 0;
+    bottom: 0;
+    width: min(300px, 82vw);
+    z-index: 40;
+    transform: translateX(100%);
+    transition: transform 0.18s ease;
+    box-shadow: -10px 0 24px rgba(0, 0, 0, 0.4);
   }
+  .editor.side-open .sidebar {
+    transform: none;
+  }
+  .side-toggle {
+    display: inline-flex;
+  }
+}
+
+/* Кнопка показа панели нужна только в этой раскладке. */
+.side-toggle {
+  display: none;
 }
