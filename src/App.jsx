@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
-import { exportToPng, normalizeShape } from './lib/shapes'
-
-const MIN_SIZE = 8
+import { MIN_SIZE, TYPE_LABELS, exportToPng, normalizeShape, sanitizeShapes, uid } from './lib/shapes'
 
 const TOOLS = [
   { id: 'select', label: 'Выделение', key: 'v' },
@@ -12,8 +10,6 @@ const TOOLS = [
   { id: 'text', label: 'Текст', key: 't' },
   { id: 'pan', label: 'Рука', key: 'h' },
 ]
-
-const TYPE_LABELS = { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', text: 'Текст' }
 
 const FONTS = [
   'Inter',
@@ -35,8 +31,6 @@ const FONTS = [
 
 const CURSOR_COLORS = ['#ec4899', '#0abab5', '#f59e0b', '#8b5cf6', '#22c55e', '#3b82f6']
 
-let seq = 0
-const uid = () => `s${Date.now().toString(36)}-${(seq++).toString(36)}`
 let clipboard = []
 const clientId = `c${Math.random().toString(36).slice(2, 8)}`
 const myName = `Гость-${Math.floor(Math.random() * 90) + 10}`
@@ -166,7 +160,14 @@ export default function App() {
   const lastCursorRef = useRef(0)
   const lastArrowRef = useRef(0)
   const chanRef = useRef(null)
+  const shapesRef = useRef(shapes)
+  const dirtyRef = useRef(false)
+  const lastRemoteRef = useRef(null)
   const editingTextRef = useRef(null)
+
+  useEffect(() => {
+    shapesRef.current = shapes
+  }, [shapes])
 
   const selected = shapes.find((s) => s.id === selectedIds[selectedIds.length - 1]) || null
 
@@ -177,18 +178,40 @@ export default function App() {
     chanRef.current = chan
     chan.onmessage = (e) => {
       const msg = e.data
-      if (!msg || msg.clientId === clientId || !msg.type) return
+      if (!msg || typeof msg !== 'object' || msg.clientId === clientId || !msg.type) return
 
-      if (msg.type === 'shapes') setShapes(msg.shapes)
+      if (msg.type === 'shapes') {
+        const clean = sanitizeShapes(msg.shapes)
+        if (!clean) return
+        lastRemoteRef.current = clean
+        setShapes(clean)
+        return
+      }
+
+      if (msg.type === 'hello') {
+        /* новая вкладка просит актуальный документ — отдаём свой */
+        chan.postMessage({ type: 'shapes', shapes: shapesRef.current, clientId: clientId })
+        return
+      }
 
       if (msg.type === 'cursor') {
+        if (typeof msg.client !== 'string') return
+        if (!Number.isFinite(msg.x) || !Number.isFinite(msg.y)) return
         setPeers((p) => ({
           ...p,
-          [msg.client]: { x: msg.x, y: msg.y, name: msg.name, color: msg.color, ts: Date.now() },
+          [msg.client]: {
+            x: msg.x,
+            y: msg.y,
+            name: String(msg.name ?? '').slice(0, 24),
+            color: /^#[0-9a-f]{3,8}$/i.test(msg.color) ? msg.color : '#8b5cf6',
+            ts: Date.now(),
+          },
         }))
+        return
       }
 
       if (msg.type === 'bye') {
+        if (typeof msg.client !== 'string') return
         setPeers((p) => {
           const q = { ...p }
           delete q[msg.client]
@@ -196,6 +219,8 @@ export default function App() {
         })
       }
     }
+    /* спросим у уже открытых вкладок их документ, прежде чем брать дефолтный */
+    chan.postMessage({ type: 'hello', clientId: clientId })
     const bye = () => chan.postMessage({ type: 'bye', client: clientId })
     window.addEventListener('beforeunload', bye)
     return () => {
@@ -206,10 +231,14 @@ export default function App() {
     }
   }, [])
 
-  /* broadcast our whole state (last-write-wins) */
+  /* Рассылаем документ только после локальной правки: иначе свежая вкладка
+     затирает работу тех, кто уже редактировал. Присланное обратно не
+     ретранслируем — иначе три вкладки зацикливают рассылку. */
   useEffect(() => {
+    if (shapes === lastRemoteRef.current) return
+    if (!dirtyRef.current) return
     const t = setTimeout(() => {
-      chanRef.current?.postMessage({ type: 'shapes', shapes, client: clientId })
+      chanRef.current?.postMessage({ type: 'shapes', shapes, clientId: clientId })
     }, 80)
     return () => clearTimeout(t)
   }, [shapes])
@@ -247,6 +276,8 @@ export default function App() {
   /* ---------------- history ---------------- */
 
   const pushHistory = useCallback((snap) => {
+    /* любая локальная правка — документ теперь наш, можно рассылать */
+    dirtyRef.current = true
     const now = performance.now()
     if (now - lastPushRef.current > 400) {
       lastPushRef.current = now
@@ -258,6 +289,7 @@ export default function App() {
   const undo = useCallback(() => {
     if (!past.length) return
     const prev = past[past.length - 1]
+    dirtyRef.current = true
     setFuture((f) => [shapes, ...f].slice(0, 60))
     setPast(past.slice(0, -1))
     setShapes(prev)
@@ -267,6 +299,7 @@ export default function App() {
   const redo = useCallback(() => {
     if (!future.length) return
     const next = future[0]
+    dirtyRef.current = true
     setPast((p) => [...p, shapes].slice(-60))
     setFuture(future.slice(1))
     setShapes(next)

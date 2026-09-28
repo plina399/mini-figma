@@ -1,6 +1,55 @@
-// Geometry helpers and PNG export for the mini-figma editor.
+// Geometry helpers, shape validation and PNG export for the mini-figma editor.
 
-const MIN_SIZE = 8
+export const MIN_SIZE = 8
+
+export const TYPE_LABELS = { frame: 'Фрейм', rect: 'Прямоугольник', ellipse: 'Эллипс', text: 'Текст' }
+
+const TYPES = new Set(Object.keys(TYPE_LABELS))
+
+let seq = 0
+export const uid = () => `s${Date.now().toString(36)}-${(seq++).toString(36)}`
+
+/* Приводит присланный по сети список фигур к безопасному виду: выкидывает
+   мусор, чинит числовые поля и гарантирует уникальные строковые id.
+   Возвращает null, если это не массив. */
+export function sanitizeShapes(list) {
+  if (!Array.isArray(list)) return null
+
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d)
+  const seen = new Set()
+  const out = []
+
+  for (const raw of list) {
+    if (!raw || typeof raw !== 'object' || !TYPES.has(raw.type)) continue
+    if (typeof raw.id !== 'string' || !raw.id || seen.has(raw.id)) continue
+
+    const min = raw.type === 'text' ? 1 : MIN_SIZE
+    const s = {
+      id: raw.id,
+      type: raw.type,
+      x: num(raw.x, 0),
+      y: num(raw.y, 0),
+      w: Math.max(min, num(raw.w, min)),
+      h: Math.max(min, num(raw.h, min)),
+      fill: typeof raw.fill === 'string' ? raw.fill : '#ec4899',
+      opacity: Math.min(1, Math.max(0, num(raw.opacity, 1))),
+      visible: raw.visible !== false,
+      parentId: typeof raw.parentId === 'string' ? raw.parentId : null,
+      name: typeof raw.name === 'string' && raw.name ? raw.name : TYPE_LABELS[raw.type],
+    }
+
+    if (raw.type === 'text') {
+      s.text = typeof raw.text === 'string' ? raw.text : ''
+      s.fontSize = Math.min(200, Math.max(8, num(raw.fontSize, 32)))
+      s.font = typeof raw.font === 'string' ? raw.font : 'Inter'
+    }
+
+    seen.add(s.id)
+    out.push(s)
+  }
+
+  return out
+}
 
 export function normalizeShape(s) {
   return {
