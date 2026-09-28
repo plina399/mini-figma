@@ -184,10 +184,12 @@
   pointer-events: none;
 }
 
+/* Шрифт НЕ задаём здесь: он приходит инлайном на .shape.text, и собственное
+   значение потомка всегда выигрывало бы у унаследованного — выбор шрифта
+   в панели не влиял на холст. Здесь только метрики строки. */
 .shape-text {
   line-height: 1.25;
   white-space: pre-wrap;
-  font-family: system-ui, 'Segoe UI', sans-serif;
   cursor: default;
 }
 

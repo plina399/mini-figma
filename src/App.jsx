@@ -1165,10 +1165,12 @@ export default function App() {
                         left: s.x,
                         top: s.y,
                         opacity: s.opacity,
+                        /* задаём всегда, включая system-ui: иначе шрифт
+                           текста зависел бы от того, указан ли он явно */
                         fontFamily:
                           s.font && s.font !== 'system-ui'
                             ? `"${s.font}", system-ui, sans-serif`
-                            : undefined,
+                            : 'system-ui, "Segoe UI", sans-serif',
                       }
                     : {
                         left: s.x,
