@@ -3,6 +3,9 @@
 
 :root {
   --accent: #ec4899;
+  --accent-soft: rgba(236, 72, 153, 0.16);
+  --accent-faint: rgba(236, 72, 153, 0.08);
+  --accent-strong: rgba(236, 72, 153, 0.25);
 
   color-scheme: dark;
 }

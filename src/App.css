@@ -16,11 +16,24 @@
   overflow: hidden;
 }
 
+/* поля ввода и текст на холсте должны оставаться выделяемыми мышью */
+.editor input,
+.editor textarea,
+.editor .text-edit,
+.editor .rename-input {
+  user-select: text;
+}
+
+/* фокус с клавиатуры должен быть виден (доступность) */
+.editor :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ---------- top bar ---------- */
 
 .topbar {
   grid-area: top;
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -170,10 +183,6 @@
   opacity: 0.45;
   pointer-events: none;
 }
-.shape-body {
-  width: 100%;
-  height: 100%;
-}
 
 .shape-text {
   line-height: 1.25;
@@ -251,7 +260,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-input[type='color'] {
+/* цвет берём из токена, а не из литерала — иначе смена акцента разъезжается */
+.sidebar input[type='color'] {
   width: 34px;
   height: 24px;
   padding: 0;
@@ -260,7 +270,7 @@ input[type='color'] {
   background: none;
   cursor: pointer;
 }
-input[type='range'] {
+.sidebar input[type='range'] {
   flex: 1;
   accent-color: var(--accent);
   cursor: pointer;
@@ -314,7 +324,7 @@ input[type='range'] {
   background: #383838;
 }
 .layer.active {
-  background: rgba(236, 72, 153, 0.16);
+  background: var(--accent-soft);
 }
 .layer.active .layer-name {
   color: #ffb3d9;
@@ -352,7 +362,7 @@ input[type='range'] {
   color: #e8e8e8;
 }
 .icon-btn.danger:hover {
-  background: rgba(236, 72, 153, 0.25);
+  background: var(--accent-strong);
   color: #ffc4e2;
 }
 
@@ -387,7 +397,7 @@ input[type='range'] {
 .marquee {
   position: absolute;
   border: 1px dashed var(--accent);
-  background: rgba(236, 72, 153, 0.08);
+  background: var(--accent-faint);
   pointer-events: none;
 }
 
@@ -508,9 +518,6 @@ input[type='range'] {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #8a8a8a;
-}
-.help-modal header h2 + .help-cols h4 {
-  margin-top: 4px;
 }
 .help-row {
   display: flex;
@@ -644,11 +651,14 @@ input[type='range'] {
 
 /* -------- scrollbars (webkit) -------- */
 
-.sidebar ::-webkit-scrollbar,
+.sidebar,
+.layers-list {
+  scrollbar-width: thin;
+  scrollbar-color: #484848 transparent;
+}
 .layers-list::-webkit-scrollbar {
   width: 8px;
 }
-.sidebar ::-webkit-scrollbar-thumb,
 .layers-list::-webkit-scrollbar-thumb {
   background: #484848;
   border-radius: 4px;

@@ -42,6 +42,8 @@ const FONTS = [
 
 const CURSOR_COLORS = ['#ec4899', '#0abab5', '#f59e0b', '#8b5cf6', '#22c55e', '#3b82f6']
 
+const NEW_SHAPE_FILL = '#ec4899'
+
 const clampZoom = (z) => Math.min(8, Math.max(0.1, z))
 
 let clipboard = []
@@ -49,7 +51,7 @@ const clientId = `c${Math.random().toString(36).slice(2, 8)}`
 const myName = `Гость-${Math.floor(Math.random() * 90) + 10}`
 const myColor = CURSOR_COLORS[Math.floor(Math.random() * CURSOR_COLORS.length)]
 
-const makeShape = (type, pt, fill = '#ec4899') => {
+const makeShape = (type, pt, fill = NEW_SHAPE_FILL) => {
   const s = {
     id: uid(),
     type,
@@ -88,20 +90,23 @@ const initialShapes = () => {
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 
+/* Контекст для разбора именованных цветов создаётся один раз:
+   safeHex дергается несколько раз за рендер. */
+let probeCtx = null
+
 function safeHex(color) {
-  if (typeof color !== 'string') return '#ec4899'
-  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim())
-  if (m) return color.trim().toLowerCase()
-  const probe = document.createElement('canvas').getContext('2d')
-  probe.fillStyle = color
-  const resolved = probe.fillStyle
-  const hex6 = /^#([0-9a-f]{6})$/i.exec(resolved)
-  if (hex6) return resolved.toLowerCase()
+  if (typeof color !== 'string') return NEW_SHAPE_FILL
+  const trimmed = color.trim()
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(trimmed)) return trimmed.toLowerCase()
+  if (!probeCtx) probeCtx = document.createElement('canvas').getContext('2d')
+  probeCtx.fillStyle = trimmed
+  const resolved = probeCtx.fillStyle
+  if (/^#([0-9a-f]{6})$/i.test(resolved)) return resolved.toLowerCase()
   const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(resolved)
   if (rgb) {
     return '#' + [rgb[1], rgb[2], rgb[3]].map((n) => Number(n).toString(16).padStart(2, '0')).join('')
   }
-  return '#ec4899'
+  return NEW_SHAPE_FILL
 }
 
 function intersects(a, b) {
@@ -174,11 +179,14 @@ export default function App() {
   const [future, setFuture] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
   const [tool, setTool] = useState('select')
-  const [fill, setFill] = useState('#ec4899')
+  /* цвет новых фигур: отдельного переключателя в UI нет, поэтому константа,
+     а не состояние с неиспользуемым сеттером */
+  const fill = NEW_SHAPE_FILL
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 60, y: 40 })
   const [draft, setDraft] = useState(null)
   const [marquee, setMarquee] = useState(null)
+  const [panning, setPanning] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editingNameId, setEditingNameId] = useState(null)
   const [showHelp, setShowHelp] = useState(false)
@@ -195,7 +203,6 @@ export default function App() {
   const shapesRef = useRef(shapes)
   const dirtyRef = useRef(false)
   const lastRemoteRef = useRef(null)
-  const editingTextRef = useRef(null)
 
   useEffect(() => {
     shapesRef.current = shapes
@@ -359,6 +366,7 @@ export default function App() {
     if (e.button === 1 || spaceRef.current || tool === 'pan') {
       e.preventDefault()
       modeRef.current = { kind: 'pan', sx: e.clientX, sy: e.clientY, pan: { ...pan } }
+      setPanning(true)
       stageRef.current.setPointerCapture(e.pointerId)
       return
     }
@@ -437,7 +445,7 @@ export default function App() {
       e.preventDefault()
       const sh = makeShape('text', toWorld(e), fill)
       pushHistory(shapes)
-      setShapes([...shapes, sh])
+      setShapes((cur) => [...cur, sh])
       setSelectedIds([sh.id])
       setEditingId(sh.id)
       setTool('select')
@@ -465,7 +473,7 @@ export default function App() {
     if (m.kind === 'marquee') {
       const x = Math.min(m.origin.x, w.x)
       const y = Math.min(m.origin.y, w.y)
-      setMarquee({ x, y, w: Math.abs(w.x - m.origin.x), h: Math.abs(w.y - m.origin.y), raw: m })
+      setMarquee({ x, y, w: Math.abs(w.x - m.origin.x), h: Math.abs(w.y - m.origin.y) })
       return
     }
 
@@ -523,6 +531,7 @@ export default function App() {
   const onStagePointerUp = () => {
     const m = modeRef.current
     modeRef.current = null
+    setPanning(false)
 
     if (m && m.kind === 'marquee') {
       if (marquee && (marquee.w > 3 || marquee.h > 3)) {
@@ -583,7 +592,7 @@ export default function App() {
             if (cx > fr.x && cx < fr.x + fr.w && cy > fr.y && cy < fr.y + fr.h) parent = f.id
           }
           const withParent = { ...sh, parentId: parent }
-          setShapes([...shapes, withParent])
+          setShapes((cur) => [...cur, withParent])
           setSelectedIds([sh.id])
         }
       }
@@ -597,6 +606,7 @@ export default function App() {
   const onStagePointerLost = () => {
     if (!modeRef.current) return
     modeRef.current = null
+    setPanning(false)
     setMarquee(null)
     setDraft(null)
   }
@@ -673,7 +683,7 @@ export default function App() {
     const originals = new Map(clipboard.map((s) => [idMap.get(s.id), s]))
     const clipSet = new Set(clipboard.map((s) => s.id))
     const rootOfClip = (s) => !(s.parentId && clipSet.has(s.parentId))
-    setShapes([...shapes, ...clones])
+    setShapes((cur) => [...cur, ...clones])
     setSelectedIds(clones.filter((c) => rootOfClip(originals.get(c.id))).map((c) => c.id))
   }
 
@@ -693,7 +703,7 @@ export default function App() {
       }))
     /* select clones of top-level selection */
     const rootDups = clones.filter((c) => rootIds.includes(c.id)).map((c) => c.id)
-    setShapes([...shapes, ...clones])
+    setShapes((cur) => [...cur, ...clones])
     setSelectedIds(rootDups.length ? rootDups : clones.map((c) => c.id))
   }
 
@@ -794,10 +804,12 @@ export default function App() {
       setSelectedIds([el.dataset.shape])
       if (tool !== 'select') setTool('select')
     }
+    /* держим меню в пределах окна с обеих сторон */
     const bw = 236
+    const bh = 330
     setCtxMenu({
-      x: Math.min(e.clientX, window.innerWidth - bw - 8),
-      y: Math.min(e.clientY, window.innerHeight - 330),
+      x: clamp(e.clientX, 8, Math.max(8, window.innerWidth - bw - 8)),
+      y: clamp(e.clientY, 8, Math.max(8, window.innerHeight - bh - 8)),
       onShape: !!(el && shapes.find((k) => k.id === el.dataset.shape)),
     })
   }
@@ -1018,7 +1030,7 @@ export default function App() {
 
       <main
         ref={stageRef}
-        className={`canvas tool-${tool}${modeRef.current?.kind === 'pan' ? ' panning' : ''}`}
+        className={`canvas tool-${tool}${panning ? ' panning' : ''}`}
         onPointerDown={onStagePointerDown}
         onPointerMove={onStagePointerMove}
         onPointerUp={onStagePointerUp}
@@ -1030,16 +1042,12 @@ export default function App() {
           const el = e.target.closest('[data-shape]')
           if (el) {
             const s = shapes.find((k) => k.id === el.dataset.shape)
-            if (s && s.type === 'text') {
-              editingTextRef.current = shapes
-              setEditingId(s.id)
-            }
+            if (s && s.type === 'text') setEditingId(s.id)
             return
           }
-          editingTextRef.current = shapes
           const sh = makeShape('text', toWorld(e), fill)
           pushHistory(shapes)
-          setShapes([...shapes, sh])
+          setShapes((cur) => [...cur, sh])
           setSelectedIds([sh.id])
           setEditingId(sh.id)
         }}
@@ -1348,10 +1356,10 @@ export default function App() {
 
       {showHelp && (
         <div className="help-overlay" onClick={() => setShowHelp(false)}>
-          <div className="help-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="help-modal" role="dialog" aria-modal="true" aria-label="Горячие клавиши" onClick={(e) => e.stopPropagation()}>
             <header>
               <h2>Горячие клавиши</h2>
-              <button className="icon-btn" onClick={() => setShowHelp(false)}>✕</button>
+              <button className="icon-btn" aria-label="Закрыть" onClick={() => setShowHelp(false)}>✕</button>
             </header>
             <div className="help-cols">
               <div>
@@ -1410,7 +1418,7 @@ export default function App() {
               setCtxMenu(null)
             }}
           />
-          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+          <div className="ctx-menu" role="menu" aria-label="Контекстное меню" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
             {ctxMenu.onShape ? (
               <>
                 {selected?.type === 'text' && !editingId && (
