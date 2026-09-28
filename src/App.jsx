@@ -995,6 +995,7 @@ export default function App() {
                     {['nw', 'ne', 'sw', 'se'].map((corner) => (
                       <div
                         key={corner}
+                        data-handle=""
                         data-corner={corner}
                         className="handle"
                         style={{
