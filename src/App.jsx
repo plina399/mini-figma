@@ -90,6 +90,32 @@ const initialShapes = () => {
 
 const clamp = (v, min, max) => Math.min(max, Math.max(min, v))
 
+/* ---------------- persistence ---------------- */
+
+const STORAGE_KEY = 'mini-figma:doc:v1'
+
+/* Достаёт сохранённый документ. Любой мусор в хранилище (другой формат,
+   битый JSON, подделанные значения) не должен ронять редактор: проверяем
+   тем же sanitizeShapes, что и сообщения соседних вкладок. */
+function loadStoredShapes() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const clean = sanitizeShapes(JSON.parse(raw))
+    return clean && clean.length ? clean : null
+  } catch {
+    return null
+  }
+}
+
+function storeShapes(list) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+  } catch {
+    /* приватный режим или переполнение квоты — молча продолжаем работать */
+  }
+}
+
 /* Контекст для разбора именованных цветов создаётся один раз:
    safeHex дергается несколько раз за рендер. */
 let probeCtx = null
@@ -174,7 +200,9 @@ function ensureFont(family) {
 }
 
 export default function App() {
-  const [shapes, setShapes] = useState(initialShapes)
+  /* Сохранённый документ важнее исходного: без этого перезагрузка
+     возвращала редактор в демонстрационное состояние и работа терялась. */
+  const [shapes, setShapes] = useState(() => loadStoredShapes() || initialShapes())
   const [past, setPast] = useState([])
   const [future, setFuture] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
@@ -213,6 +241,13 @@ export default function App() {
   }, [shapes])
 
   const selected = shapes.find((s) => s.id === selectedIds[selectedIds.length - 1]) || null
+
+  /* Пишем с дебаунсом: перетаскивание фигуры даёт десятки обновлений в
+     секунду, а в хранилище полезно складывать только устоявшееся. */
+  useEffect(() => {
+    const t = setTimeout(() => storeShapes(shapes), 400)
+    return () => clearTimeout(t)
+  }, [shapes])
 
   /* ---------------- collaboration (BroadcastChannel) ---------------- */
 
