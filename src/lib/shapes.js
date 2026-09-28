@@ -42,6 +42,9 @@ export function sanitizeShapes(list) {
       s.text = typeof raw.text === 'string' ? raw.text : ''
       s.fontSize = Math.min(200, Math.max(8, num(raw.fontSize, 32)))
       s.font = typeof raw.font === 'string' ? raw.font : 'Inter'
+      /* w/h текста — производные от содержимого, принятые извне значения
+         игнорируем: иначе ресайз считал бы масштаб от чужой ширины. */
+      Object.assign(s, withTextMetrics(s))
     }
 
     seen.add(s.id)
@@ -77,6 +80,14 @@ export function textHeight(s) {
 export function textWidthApprox(s) {
   const size = s.fontSize || 32
   return Math.max(24, ...textLines(s).map((l) => l.length * size * 0.55))
+}
+
+/* У текста размеры выводятся из содержимого и кегля, поэтому держим w/h
+   в актуальном состоянии. Пока они расходились с вёрсткой, ресайз считал
+   коэффициент от устаревшей ширины и кегль «уезжал» от раза к разу. */
+export function withTextMetrics(s) {
+  if (s.type !== 'text') return s
+  return { ...s, w: textWidthApprox(s), h: textHeight(s) }
 }
 
 export function shapeRect(s) {

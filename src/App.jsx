@@ -8,9 +8,9 @@ import {
   normalizeShape,
   sanitizeShapes,
   shapeRect,
-  textHeight,
   textWidthApprox,
   uid,
+  withTextMetrics,
 } from './lib/shapes'
 
 const TOOLS = [
@@ -495,11 +495,21 @@ export default function App() {
     if (handleEl && selectedIds.length === 1) {
       const s = selected
       if (s) {
+        /* У текста ширина не хранится, а получается из содержимого, поэтому
+           для масштаба кегля берём реально отрисованную ширину: оценка
+           textWidthApprox расходится с ней, и ресайз «уезжал». */
+        let textW = 0
+        if (s.type === 'text') {
+          const el = handleEl.closest('[data-shape]')
+          const r = el ? el.getBoundingClientRect() : null
+          if (r && r.width > 0) textW = r.width / zoom
+        }
         modeRef.current = {
           kind: 'resize',
           corner: handleEl.dataset.corner,
           orig: { ...s },
           snap: shapes,
+          textW,
           moved: false,
         }
         stageRef.current.setPointerCapture(e.pointerId)
@@ -632,9 +642,14 @@ export default function App() {
         pushHistory(m.snap)
       }
       if (o.type === 'text') {
-        /* у текста размер задаётся кеглем: тянем углы — меняем шрифт */
-        const fs = clamp(Math.round((o.fontSize || 32) * (nw / Math.max(1, o.w))), 8, 200)
-        setShapes((cur) => cur.map((s) => (s.id === o.id ? { ...s, fontSize: fs } : s)))
+        /* У текста размер задаётся кеглем: тянем углы — меняем шрифт.
+           База — ширина, реально отрисованная в момент захвата (m.textW),
+           иначе каждый ресайз считал масштаб от завышенной оценки. */
+        const base = m.textW > 1 ? m.textW : textWidthApprox(o)
+        const fs = clamp(Math.round((o.fontSize || 32) * (nw / base)), 8, 200)
+        setShapes((cur) =>
+          cur.map((s) => (s.id === o.id ? withTextMetrics({ ...s, fontSize: fs }) : s)),
+        )
         return
       }
       setShapes((cur) => cur.map((s) => (s.id === o.id ? { ...s, x, y, w: nw, h: nh } : s)))
@@ -1053,7 +1068,8 @@ export default function App() {
     if (!selected) return
     const id = selected.id
     pushHistory(shapes)
-    setShapes((cur) => cur.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+    /* смена кегля меняет и габариты текста — пересчитываем их вместе */
+    setShapes((cur) => cur.map((s) => (s.id === id ? withTextMetrics({ ...s, ...patch }) : s)))
   }
 
   const updateMany = (patch) => {
@@ -1087,11 +1103,7 @@ export default function App() {
     pushHistory(shapes)
     /* функциональная форма: не затираем правки, случившиеся в этом же тике */
     setShapes((cur) =>
-      cur.map((k) => {
-        if (k.id !== id) return k
-        const next = { ...k, text: newText }
-        return { ...next, h: textHeight(next), w: Math.max(k.w, textWidthApprox(next)) }
-      }),
+      cur.map((k) => (k.id === id ? withTextMetrics({ ...k, text: newText }) : k)),
     )
   }
 
@@ -1362,7 +1374,10 @@ export default function App() {
                       min="8"
                       max="200"
                       value={selected.fontSize}
-                      onChange={(e) => updateSelected({ fontSize: clamp(Number(e.target.value) || 32, 8, 200) })}
+                      onChange={(e) => {
+                      const size = clamp(Number(e.target.value) || 32, 8, 200)
+                      updateSelected({ fontSize: size })
+                    }}
                     />
                   </div>
                 </>
